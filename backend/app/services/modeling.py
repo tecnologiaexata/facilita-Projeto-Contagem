@@ -2,6 +2,8 @@ import shutil
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from threading import Lock, Thread
+from uuid import uuid4
 
 import cv2
 import joblib
@@ -19,7 +21,7 @@ from app.services.annotation import (
     compute_pixel_distribution,
     persist_annotation_record,
 )
-from app.services.monitoring import tracked_task
+from app.services.monitoring import list_active_tasks, list_recent_tasks, tracked_task
 from app.services.storage import (
     annotation_bundle,
     class_catalog,
@@ -41,12 +43,125 @@ from app.services.storage import (
 MODEL_PATH = MODELS_DIR / "latest.joblib"
 MAX_PIXELS_PER_CLASS = 3500
 RNG = np.random.default_rng(42)
+ACTIVE_TRAINING_STATUSES = {"queued", "running"}
 
 
 @dataclass
 class LoadedModel:
     classifier: RandomForestClassifier
     trained_at: str
+
+
+@dataclass
+class TrainingJobState:
+    id: str
+    status: str
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+
+
+TRAINING_JOB_LOCK = Lock()
+TRAINING_JOB_STATE: TrainingJobState | None = None
+
+
+def _active_training_task() -> dict | None:
+    active_tasks = list_active_tasks(kind="training")
+    return active_tasks[0] if active_tasks else None
+
+
+def _recent_training_task() -> dict | None:
+    recent_tasks = list_recent_tasks(kind="training")
+    return recent_tasks[0] if recent_tasks else None
+
+
+def _default_training_phase(status: str) -> str:
+    if status == "queued":
+        return "Aguardando disponibilidade do backend"
+    if status == "running":
+        return "Treinando modelo"
+    if status == "completed":
+        return "Concluido"
+    if status == "failed":
+        return "Falha no treino"
+    return "Aguardando"
+
+
+def _serialize_training_job(job: TrainingJobState | None) -> dict | None:
+    if job is None:
+        return None
+
+    active_task = _active_training_task()
+    recent_task = (
+        _recent_training_task()
+        if not active_task and job.status not in ACTIVE_TRAINING_STATUSES
+        else None
+    )
+    task_payload = active_task or recent_task
+    status = "running" if active_task and job.status in ACTIVE_TRAINING_STATUSES else job.status
+    phase = task_payload["phase"] if task_payload else _default_training_phase(status)
+
+    return {
+        "id": job.id,
+        "status": status,
+        "is_active": status in ACTIVE_TRAINING_STATUSES,
+        "phase": phase,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "elapsed_seconds": task_payload.get("elapsed_seconds") if task_payload else None,
+        "error": job.error or (task_payload.get("error") if task_payload else None),
+        "task": task_payload,
+    }
+
+
+def _update_training_job(job_id: str, **changes) -> None:
+    global TRAINING_JOB_STATE
+
+    with TRAINING_JOB_LOCK:
+        if TRAINING_JOB_STATE is None or TRAINING_JOB_STATE.id != job_id:
+            return
+        for field_name, value in changes.items():
+            setattr(TRAINING_JOB_STATE, field_name, value)
+
+
+def _run_training_job(job_id: str) -> None:
+    _update_training_job(job_id, status="running", started_at=now_iso(), finished_at=None, error=None)
+    try:
+        train_latest_model()
+    except HTTPException as exc:
+        error_message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        _update_training_job(job_id, status="failed", finished_at=now_iso(), error=error_message)
+    except Exception as exc:  # pragma: no cover - defensive
+        _update_training_job(job_id, status="failed", finished_at=now_iso(), error=str(exc))
+    else:
+        _update_training_job(job_id, status="completed", finished_at=now_iso(), error=None)
+
+
+def start_training_job() -> tuple[dict | None, bool]:
+    global TRAINING_JOB_STATE
+
+    with TRAINING_JOB_LOCK:
+        current_job = TRAINING_JOB_STATE
+        if current_job is not None and current_job.status in ACTIVE_TRAINING_STATUSES:
+            return _serialize_training_job(current_job), False
+
+        current_job = TrainingJobState(
+            id=f"train_{uuid4().hex[:12]}",
+            status="queued",
+            created_at=now_iso(),
+        )
+        TRAINING_JOB_STATE = current_job
+
+    thread = Thread(
+        target=_run_training_job,
+        args=(current_job.id,),
+        daemon=True,
+        name=f"training-job-{current_job.id}",
+    )
+    thread.start()
+    return _serialize_training_job(current_job), True
 
 
 def read_image_upload(upload: UploadFile) -> Image.Image:
@@ -339,6 +454,9 @@ def build_model_download_filename(trained_at: str | None = None) -> str:
 def training_status() -> dict:
     report = latest_training_report()
     has_model = MODEL_PATH.exists()
+    with TRAINING_JOB_LOCK:
+        current_job = TRAINING_JOB_STATE
+
     return {
         "has_model": has_model,
         "latest_report": report,
@@ -346,4 +464,5 @@ def training_status() -> dict:
         "download_url": "/api/training/model" if has_model else None,
         "model_filename": build_model_download_filename(report["trained_at"] if report else None) if has_model else None,
         "model_size_bytes": MODEL_PATH.stat().st_size if has_model else None,
+        "job": _serialize_training_job(current_job),
     }

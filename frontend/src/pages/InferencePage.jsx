@@ -20,6 +20,19 @@ function readCoffeeMetrics(item) {
   };
 }
 
+async function fetchInferencePageData() {
+  const [trainingPayload, inferencePayload] = await Promise.all([getTraining(), getInferences()]);
+  return {
+    training: trainingPayload,
+    history: inferencePayload.items,
+  };
+}
+
+function buildTrainingProgressMessage(job, prefix = "Treino em background") {
+  const phase = job?.task?.phase || job?.phase;
+  return phase ? `${prefix}: ${phase}.` : `${prefix} em andamento.`;
+}
+
 export default function InferencePage() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [result, setResult] = useState(null);
@@ -27,23 +40,88 @@ export default function InferencePage() {
   const [training, setTraining] = useState(null);
   const [status, setStatus] = useState({ kind: "idle", message: "" });
   const [deletingId, setDeletingId] = useState("");
+  const trainingJob = training?.job;
+  const isTrainingRunning = Boolean(trainingJob?.is_active);
 
   useEffect(() => {
     loadPage();
   }, []);
 
+  useEffect(() => {
+    if (!trainingJob?.is_active) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let timer = null;
+
+    async function pollTraining() {
+      try {
+        const trainingPayload = await getTraining();
+        if (cancelled) return;
+
+        setTraining(trainingPayload);
+
+        const nextJob = trainingPayload.job;
+        if (nextJob?.is_active) {
+          setStatus({
+            kind: "loading",
+            message: buildTrainingProgressMessage(nextJob),
+          });
+          timer = window.setTimeout(pollTraining, 3000);
+          return;
+        }
+
+        if (nextJob?.status === "failed") {
+          setStatus({
+            kind: "error",
+            message: nextJob.error || "Falha ao treinar o modelo.",
+          });
+          return;
+        }
+
+        const pageData = await fetchInferencePageData();
+        if (cancelled) return;
+
+        setTraining(pageData.training);
+        setHistory(pageData.history);
+        setStatus({
+          kind: "success",
+          message: "Treino concluido. Agora voce pode rodar a inferencia.",
+        });
+      } catch (error) {
+        if (cancelled) return;
+        setStatus({ kind: "error", message: error.message });
+      }
+    }
+
+    timer = window.setTimeout(pollTraining, 3000);
+    return () => {
+      cancelled = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [trainingJob?.id, trainingJob?.status]);
+
   async function loadPage() {
     try {
-      const [trainingPayload, inferencePayload] = await Promise.all([getTraining(), getInferences()]);
-      setTraining(trainingPayload);
-      setHistory(inferencePayload.items);
+      const pageData = await fetchInferencePageData();
+      setTraining(pageData.training);
+      setHistory(pageData.history);
+      if (pageData.training?.job?.is_active) {
+        setStatus({
+          kind: "loading",
+          message: buildTrainingProgressMessage(pageData.training.job),
+        });
+      }
     } catch (error) {
       setStatus({ kind: "error", message: error.message });
     }
   }
 
   async function handleInference() {
-    if (!selectedFile) return;
+    if (!selectedFile || !training?.has_model || isTrainingRunning) return;
     setStatus({ kind: "loading", message: "Processando imagem e calculando percentuais..." });
     try {
       const payload = await runInference(selectedFile);
@@ -59,9 +137,22 @@ export default function InferencePage() {
   }
 
   async function handleTrainFirst() {
-    setStatus({ kind: "loading", message: "Treinando modelo antes da inferencia..." });
+    setStatus({ kind: "loading", message: "Iniciando treino em background..." });
     try {
-      await runTraining();
+      const payload = await runTraining();
+      setTraining(payload.item);
+
+      if (payload.item?.job?.is_active) {
+        setStatus({
+          kind: "loading",
+          message: buildTrainingProgressMessage(
+            payload.item.job,
+            payload.started ? "Treino iniciado em background" : "Treino ja em andamento",
+          ),
+        });
+        return;
+      }
+
       await loadPage();
       setStatus({ kind: "success", message: "Treino concluido. Agora voce pode rodar a inferencia." });
     } catch (error) {
@@ -115,20 +206,29 @@ export default function InferencePage() {
         <div className="callout">
           <strong>Modelo atual</strong>
           <p>
-            {training?.has_model
+            {isTrainingRunning
+              ? buildTrainingProgressMessage(trainingJob)
+              : training?.has_model
               ? `Treinado em ${new Date(training.latest_report?.trained_at || Date.now()).toLocaleString("pt-BR")}`
               : "Ainda nao existe modelo salvo."}
           </p>
         </div>
 
-        <div className={`status status--${status.kind}`}>{status.message || "Envie uma imagem para segmentar."}</div>
+        <div className={`status status--${status.kind}`}>
+          {status.message
+            || (isTrainingRunning
+              ? buildTrainingProgressMessage(trainingJob)
+              : training?.has_model
+                ? "Envie uma imagem para segmentar."
+                : "Treine o modelo antes de rodar a inferencia.")}
+        </div>
 
         <div className="button-row">
           <button
             type="button"
             className="button"
             onClick={handleInference}
-            disabled={!selectedFile || status.kind === "loading"}
+            disabled={!selectedFile || !training?.has_model || isTrainingRunning || status.kind === "loading"}
           >
             Rodar inferencia
           </button>
@@ -136,9 +236,9 @@ export default function InferencePage() {
             type="button"
             className="button button--ghost"
             onClick={handleTrainFirst}
-            disabled={status.kind === "loading"}
+            disabled={status.kind === "loading" || isTrainingRunning || Boolean(deletingId)}
           >
-            Treinar agora
+            {isTrainingRunning ? "Treino em andamento..." : "Treinar agora"}
           </button>
         </div>
       </div>

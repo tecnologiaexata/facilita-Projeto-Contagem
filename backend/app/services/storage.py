@@ -138,13 +138,41 @@ def serialize_annotation_record(payload: dict) -> dict:
     }
 
 
-def list_annotation_records() -> list[dict]:
+def list_annotation_metadata_paths() -> list[Path]:
     ensure_storage()
-    records: list[dict] = []
-    for metadata_path in sorted(ANNOTATION_METADATA_DIR.glob("*.json"), reverse=True):
-        payload = read_json(metadata_path)
-        records.append(serialize_annotation_record(payload))
-    return records
+    return sorted(ANNOTATION_METADATA_DIR.glob("*.json"), reverse=True)
+
+
+def count_annotation_records() -> int:
+    return len(list_annotation_metadata_paths())
+
+
+def load_annotation_payload(sample_id: str) -> dict | None:
+    metadata_path = annotation_bundle(sample_id)["metadata"]
+    if not metadata_path.exists():
+        return None
+    return read_json(metadata_path)
+
+
+def load_annotation_record(sample_id: str) -> dict | None:
+    payload = load_annotation_payload(sample_id)
+    if payload is None:
+        return None
+    return serialize_annotation_record(payload)
+
+
+def list_annotation_payloads(*, offset: int = 0, limit: int | None = None) -> list[dict]:
+    metadata_paths = list_annotation_metadata_paths()
+    end = None if limit is None else offset + limit
+    return [read_json(path) for path in metadata_paths[offset:end]]
+
+
+def list_annotation_records(*, offset: int = 0, limit: int | None = None) -> list[dict]:
+    ensure_storage()
+    return [
+        serialize_annotation_record(payload)
+        for payload in list_annotation_payloads(offset=offset, limit=limit)
+    ]
 
 
 def list_inference_records() -> list[dict]:

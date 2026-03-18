@@ -264,6 +264,27 @@ class MonitoringRegistry:
             },
         }
 
+    def active_tasks(self, kind: str | None = None) -> list[dict]:
+        current_cpu_time = self._current_cpu_time()
+        current_rss = self._current_rss()
+        with self._lock:
+            items = [
+                self._serialize_active_task(record, current_cpu_time, current_rss)
+                for record in self._active_tasks.values()
+                if kind is None or record.kind == kind
+            ]
+        items.sort(key=lambda item: item["started_at"])
+        return items
+
+    def recent_tasks(self, kind: str | None = None) -> list[dict]:
+        with self._lock:
+            items = [
+                dict(item)
+                for item in self._recent_tasks
+                if kind is None or item["kind"] == kind
+            ]
+        return items
+
 
 MONITORING = MonitoringRegistry()
 
@@ -282,3 +303,11 @@ def tracked_task(kind: str, label: str, metadata: dict | None = None):
 
 def monitoring_snapshot() -> dict:
     return MONITORING.snapshot()
+
+
+def list_active_tasks(kind: str | None = None) -> list[dict]:
+    return MONITORING.active_tasks(kind=kind)
+
+
+def list_recent_tasks(kind: str | None = None) -> list[dict]:
+    return MONITORING.recent_tasks(kind=kind)

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import AnnotationBoard from "../components/AnnotationBoard";
-import { deleteAnnotation, getAnnotations, getMeta, saveAnnotation } from "../lib/api";
+import { deleteAnnotation, getAnnotation, getSam2Status, saveAnnotation } from "../lib/api";
 
 const WIZARD_STEPS = [
   { id: "image", shortLabel: "Imagem" },
@@ -196,7 +196,7 @@ export default function AnnotatePage() {
   const [initialMaskUrl, setInitialMaskUrl] = useState("");
 
   useEffect(() => {
-    loadMeta();
+    loadSam2Status();
   }, []);
 
   const sampleToEdit = searchParams.get("sample") || "";
@@ -222,10 +222,10 @@ export default function AnnotatePage() {
     return `${selectedFile.name} · ${Math.round(selectedFile.size / 1024)} KB`;
   }, [selectedFile]);
 
-  async function loadMeta() {
+  async function loadSam2Status() {
     try {
-      const payload = await getMeta();
-      setSam2Status(payload.sam2);
+      const payload = await getSam2Status();
+      setSam2Status(payload);
     } catch (error) {
       setStatus({ kind: "error", message: error.message });
     }
@@ -259,11 +259,8 @@ export default function AnnotatePage() {
   async function loadAnnotationForEditing(sampleId) {
     setStatus({ kind: "loading", message: "Carregando anotacao salva para edicao..." });
     try {
-      const payload = await getAnnotations();
-      const item = payload.items.find((entry) => entry.id === sampleId);
-      if (!item) {
-        throw new Error("Anotacao nao encontrada para edicao.");
-      }
+      const payload = await getAnnotation(sampleId);
+      const item = payload.item;
 
       const [imageFile, occupancy] = await Promise.all([
         fetchFileFromUrl(item.image_url, item.original_filename),

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,13 +16,15 @@ from app.services.modeling import (
     build_model_download_filename,
     delete_inference,
     run_inference,
-    train_latest_model,
+    start_training_job,
     training_status,
 )
 from app.services.sam2 import Sam2PredictRequest, create_sam2_session, predict_for_session, sam2_status
 from app.services.storage import (
     class_catalog,
+    count_annotation_records,
     ensure_storage,
+    load_annotation_record,
     list_annotation_records,
     list_inference_records,
 )
@@ -57,9 +59,18 @@ def meta() -> dict:
 
 
 @app.get("/api/annotations")
-def get_annotations() -> dict:
-    records = list_annotation_records()
-    return {"items": records, "total": len(records)}
+def get_annotations(
+    offset: int = Query(default=0, ge=0),
+    limit: int | None = Query(default=None, ge=1),
+) -> dict:
+    total = count_annotation_records()
+    records = list_annotation_records(offset=offset, limit=limit)
+    return {
+        "items": records,
+        "total": total,
+        "offset": offset,
+        "limit": limit if limit is not None else len(records),
+    }
 
 
 @app.post("/api/annotations")
@@ -69,6 +80,14 @@ def create_annotation(
     sample_id: str | None = Form(default=None),
 ) -> dict:
     record = save_annotation(original_image, mask_image, sample_id=sample_id)
+    return {"item": record}
+
+
+@app.get("/api/annotations/{sample_id}")
+def get_annotation(sample_id: str) -> dict:
+    record = load_annotation_record(sample_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Anotacao nao encontrada.")
     return {"item": record}
 
 
@@ -100,9 +119,13 @@ def get_training() -> dict:
     return training_status()
 
 
-@app.post("/api/training/run")
+@app.post("/api/training/run", status_code=202)
 def run_training() -> dict:
-    return {"item": train_latest_model()}
+    _, started = start_training_job()
+    return {
+        "item": training_status(),
+        "started": started,
+    }
 
 
 @app.get("/api/training/model")

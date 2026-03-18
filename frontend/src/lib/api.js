@@ -16,6 +16,16 @@ async function request(path, options = {}) {
   return payload;
 }
 
+function withQuery(path, params = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return;
+    query.set(key, String(value));
+  });
+  const serialized = query.toString();
+  return serialized ? `${path}?${serialized}` : path;
+}
+
 export function getMeta() {
   return request("/api/meta");
 }
@@ -28,8 +38,12 @@ export function getSam2Status() {
   return request("/api/sam2/status");
 }
 
-export function getAnnotations() {
-  return request("/api/annotations");
+export function getAnnotations(params = {}) {
+  return request(withQuery("/api/annotations", params));
+}
+
+export function getAnnotation(sampleId) {
+  return request(`/api/annotations/${sampleId}`);
 }
 
 export function saveAnnotation(originalImage, maskBlob, sampleId = "") {

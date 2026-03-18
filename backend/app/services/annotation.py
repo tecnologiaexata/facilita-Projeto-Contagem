@@ -10,6 +10,7 @@ from app.services.monitoring import tracked_task
 from app.services.cvat import export_cvat_for_mask
 from app.services.storage import (
     annotation_bundle,
+    list_annotation_payloads,
     list_annotation_records,
     make_asset_id,
     now_iso,
@@ -216,12 +217,12 @@ def _delete_file(path: Path) -> None:
 
 
 def annotations_summary() -> dict:
-    records = list_annotation_records()
-    total_images = len(records)
+    payloads = list_annotation_payloads()
+    total_images = len(payloads)
     merged_counts = {meta["slug"]: 0 for meta in CLASS_MAP.values()}
     total_pixels = 0
-    for record in records:
-        stats = record["pixel_stats"]
+    for payload in payloads:
+        stats = payload["pixel_stats"]
         total_pixels += stats["total_pixels"]
         for slug, count in stats["counts"].items():
             merged_counts[slug] += count
