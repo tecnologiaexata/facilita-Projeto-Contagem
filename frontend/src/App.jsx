@@ -83,7 +83,7 @@ function PreviewFigure({ src, alt, caption }) {
 
 function GalleryCard({ item, busy, onDelete }) {
   const stats = item.pixel_stats?.coffee_metrics ?? {};
-  const sourceLabel = item.source_type === "external_txt" ? "TXT externo" : "Legado interno";
+  const sourceLabel = item.source_type === "external_txt" ? "TXT externo" : "Mascara interna";
 
   return (
     <article className="record-card">
@@ -120,13 +120,13 @@ function GalleryCard({ item, busy, onDelete }) {
 
       <div className="record-card__stats">
         <span>Cafe: {formatPercent(stats.cafe_percentual_na_imagem)}</span>
-        <span>Descarte: {formatPercent(stats.descarte_percentual_na_imagem)}</span>
-        <span>Fruto no cafe: {formatPercent(stats.fruto_percentual_no_cafe)}</span>
-        <span>Folhagem no cafe: {formatPercent(stats.folhagem_percentual_no_cafe)}</span>
+        <span>Planta: {formatPercent(stats.planta_percentual_na_imagem)}</span>
+        <span>Area mapeada: {formatPercent(stats.area_mapeada_percentual_na_imagem)}</span>
+        <span>Fundo: {formatPercent(stats.fundo_percentual_na_imagem)}</span>
       </div>
 
       <div className="record-card__footer">
-        <span>Formato: {item.annotation_format || "legado"}</span>
+        <span>Formato: {item.annotation_format || "mascara"}</span>
         <span>Formas: {item.annotation_shape_count ?? "-"}</span>
         <span>
           Classes: {Array.isArray(item.annotation_classes) && item.annotation_classes.length ? item.annotation_classes.join(", ") : "-"}
@@ -166,9 +166,9 @@ function InferenceCard({ item, busy, onDelete }) {
       </div>
 
       <div className="record-card__stats">
-        <span>Area cafe: {formatPercent(item.area_cafe_percentual)}</span>
-        <span>Fruto no cafe: {formatPercent(item.fruto_percentual_na_area_cafe)}</span>
-        <span>Folhagem no cafe: {formatPercent(item.folhagem_percentual_na_area_cafe)}</span>
+        <span>Cafe: {formatPercent(item.cafe_percentual_na_imagem)}</span>
+        <span>Planta: {formatPercent(item.planta_percentual_na_imagem)}</span>
+        <span>Area mapeada: {formatPercent(item.area_mapeada_percentual_na_imagem)}</span>
         <span>Fundo: {formatPercent(item.fundo_percentual_na_imagem)}</span>
       </div>
     </article>
@@ -360,7 +360,8 @@ export default function App() {
           <p className="eyebrow">Facilita Coffee Counter</p>
           <h1>Galeria, treino e analise em um fluxo so.</h1>
           <p className="hero__text">
-            Esta versao remove o mapeamento interno e passa a operar com <strong>foto + TXT externo</strong>.
+            Esta versao opera com <strong>foto + TXT externo</strong> no novo modelo semantico: <strong>0 = cafe</strong> e{" "}
+            <strong>1 = planta</strong>.
             Tudo que entra no sistema vira item de galeria, pode treinar o modelo e depois servir de base para novas analises.
           </p>
         </div>
@@ -393,7 +394,8 @@ export default function App() {
             <p className="eyebrow">1. Subir para galeria</p>
             <h2>Foto + anotacao externa</h2>
             <p>
-              Envie a imagem final e o TXT exportado do site terceiro. O backend converte o arquivo em mascara interna para reaproveitar o treino atual.
+              Envie a imagem final e o TXT exportado do site terceiro. O backend interpreta o arquivo no padrao numerico
+              do projeto e converte tudo para a mascara interna usada no treino.
             </p>
           </div>
 
@@ -410,9 +412,9 @@ export default function App() {
 
             <div className="hint-card">
               <strong>Formatos aceitos</strong>
-              <p>`folhagem 0.10 0.20 0.30 0.40 0.50 0.25` para poligono.</p>
-              <p>`fruto 0.52 0.41 0.08 0.10` para bounding box YOLO.</p>
-              <p>`# class-map: 0=folhagem, 1=fruto` quando o TXT usar ids numericos.</p>
+              <p>`0 x1 y1 x2 y2 x3 y3 ...` para poligono de cafe.</p>
+              <p>`1 cx cy w h` para bounding box YOLO de planta.</p>
+              <p>`# class-map: 0=cafe, 1=planta` quando o TXT vier com cabecalho explicito.</p>
             </div>
 
             <button type="submit" className="primary-button">
@@ -513,7 +515,7 @@ export default function App() {
         ) : (
           <div className="empty-state">
             <h3>Nenhum item salvo ainda.</h3>
-            <p>Assim que uma foto com TXT for enviada, ela aparece aqui com overlay e metricas.</p>
+            <p>Assim que uma foto com TXT for enviada, ela aparece aqui com overlay e metricas de cafe, planta e fundo.</p>
           </div>
         )}
       </section>

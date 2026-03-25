@@ -30,10 +30,10 @@ from app.services.storage import (
 MASK_LEVELS = np.array([0, 85, 170], dtype=np.uint8)
 YOLO_SEGMENTATION_HINT = (
     "Use linhas no formato YOLO de poligono ou bounding box. "
-    "Exemplo: 'folhagem 0.10 0.20 0.30 0.40 0.50 0.25' ou "
-    "'fruto 0.52 0.41 0.08 0.10'. "
+    "Exemplo: 'cafe 0.10 0.20 0.30 0.40 0.50 0.25' ou "
+    "'planta 0.52 0.41 0.08 0.10'. "
     "Para ids numericos ambiguos, adicione um cabecalho como "
-    "'# class-map: 0=folhagem, 1=fruto'."
+    "'# class-map: 0=cafe, 1=planta'."
 )
 
 CLASS_NAME_TO_ID = {
@@ -41,13 +41,13 @@ CLASS_NAME_TO_ID = {
     "bg": 0,
     "descarte": 0,
     "fundo": 0,
-    "folha": 1,
-    "folhagem": 1,
-    "leaf": 1,
-    "leaves": 1,
-    "fruto": 2,
-    "fruit": 2,
-    "berry": 2,
+    "cafe": 1,
+    "coffee": 1,
+    "grao": 1,
+    "graos": 1,
+    "planta": 2,
+    "plant": 2,
+    "plants": 2,
 }
 
 
@@ -193,7 +193,7 @@ def _resolve_class_id(label_token: str, numeric_map: dict[int, int], line_number
     if class_id is None:
         raise create_http_error(
             f"Linha {line_number}: classe '{label_token}' nao reconhecida. "
-            "Use fundo, folhagem ou fruto."
+            "Use fundo, cafe ou planta."
         )
     return class_id
 
@@ -301,17 +301,29 @@ def build_class_mask_from_txt(annotation_text: str, width: int, height: int) -> 
     draw = ImageDraw.Draw(mask_image)
     used_classes: set[str] = set()
     used_formats: set[str] = set()
+    resolved_shapes_by_class: dict[int, list[dict]] = {class_id: [] for class_id in CLASS_MAP}
 
     for shape in shapes:
         class_id = _resolve_class_id(shape["label_token"], numeric_map, shape["line_number"])
         used_classes.add(CLASS_MAP[class_id]["slug"])
-        if shape["kind"] == "polygon":
-            draw.polygon(_polygon_points_to_pixels(shape["coordinates"], width, height), fill=int(class_id))
-            used_formats.add("yolo_polygon")
-            continue
+        resolved_shapes_by_class.setdefault(class_id, []).append(shape)
 
-        draw.rectangle(_bbox_to_pixels(shape["coordinates"], width, height), fill=int(class_id))
-        used_formats.add("yolo_bbox")
+    class_order = [
+        class_id
+        for class_id, _ in sorted(
+            CLASS_MAP.items(),
+            key=lambda item: (item[1].get("draw_order", item[0]), item[0]),
+        )
+    ]
+
+    for class_id in class_order:
+        for shape in resolved_shapes_by_class.get(class_id, []):
+            if shape["kind"] == "polygon":
+                draw.polygon(_polygon_points_to_pixels(shape["coordinates"], width, height), fill=int(class_id))
+                used_formats.add("yolo_polygon")
+                continue
+            draw.rectangle(_bbox_to_pixels(shape["coordinates"], width, height), fill=int(class_id))
+            used_formats.add("yolo_bbox")
 
     return np.array(mask_image, dtype=np.uint8), {
         "annotation_format": "mixed" if len(used_formats) > 1 else next(iter(used_formats)),
@@ -340,15 +352,27 @@ def compute_pixel_distribution(class_mask: np.ndarray) -> dict:
 
 
 def compute_coffee_metrics(counts: dict[str, int], total_pixels: int) -> dict:
-    cafe_pixels = counts["folhagem"] + counts["fruto"]
-    descarte_pixels = counts["fundo"]
+    cafe_pixels = counts["cafe"]
+    planta_pixels = counts["planta"]
+    fundo_pixels = counts["fundo"]
+    area_mapeada_pixels = cafe_pixels + planta_pixels
     return {
         "cafe_pixels": cafe_pixels,
-        "descarte_pixels": descarte_pixels,
+        "planta_pixels": planta_pixels,
+        "fundo_pixels": fundo_pixels,
+        "area_mapeada_pixels": area_mapeada_pixels,
         "cafe_percentual_na_imagem": round((cafe_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
-        "descarte_percentual_na_imagem": round((descarte_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
-        "fruto_percentual_no_cafe": round((counts["fruto"] / cafe_pixels) * 100, 2) if cafe_pixels else 0.0,
-        "folhagem_percentual_no_cafe": round((counts["folhagem"] / cafe_pixels) * 100, 2) if cafe_pixels else 0.0,
+        "planta_percentual_na_imagem": round((planta_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
+        "fundo_percentual_na_imagem": round((fundo_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
+        "area_mapeada_percentual_na_imagem": round((area_mapeada_pixels / total_pixels) * 100, 2)
+        if total_pixels
+        else 0.0,
+        "cafe_percentual_na_area_mapeada": round((cafe_pixels / area_mapeada_pixels) * 100, 2)
+        if area_mapeada_pixels
+        else 0.0,
+        "planta_percentual_na_area_mapeada": round((planta_pixels / area_mapeada_pixels) * 100, 2)
+        if area_mapeada_pixels
+        else 0.0,
     }
 
 

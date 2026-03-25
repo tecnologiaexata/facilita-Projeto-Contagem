@@ -80,6 +80,126 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _empty_class_counts() -> dict[str, int]:
+    return {
+        meta["slug"]: 0
+        for _, meta in sorted(CLASS_MAP.items(), key=lambda item: item[0])
+    }
+
+
+def _normalize_class_counts(values: dict | None) -> dict[str, int]:
+    normalized = _empty_class_counts()
+    if not isinstance(values, dict):
+        return normalized
+
+    for raw_slug, raw_value in values.items():
+        slug = str(raw_slug)
+        if slug not in normalized or not isinstance(raw_value, (int, float)):
+            continue
+        normalized[slug] += int(raw_value)
+
+    return normalized
+
+
+def _build_current_metrics(counts: dict[str, int], total_pixels: int) -> dict:
+    cafe_pixels = counts["cafe"]
+    planta_pixels = counts["planta"]
+    fundo_pixels = counts["fundo"]
+    area_mapeada_pixels = cafe_pixels + planta_pixels
+    return {
+        "cafe_pixels": cafe_pixels,
+        "planta_pixels": planta_pixels,
+        "fundo_pixels": fundo_pixels,
+        "area_mapeada_pixels": area_mapeada_pixels,
+        "cafe_percentual_na_imagem": round((cafe_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
+        "planta_percentual_na_imagem": round((planta_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
+        "fundo_percentual_na_imagem": round((fundo_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
+        "area_mapeada_percentual_na_imagem": round((area_mapeada_pixels / total_pixels) * 100, 2)
+        if total_pixels
+        else 0.0,
+        "cafe_percentual_na_area_mapeada": round((cafe_pixels / area_mapeada_pixels) * 100, 2)
+        if area_mapeada_pixels
+        else 0.0,
+        "planta_percentual_na_area_mapeada": round((planta_pixels / area_mapeada_pixels) * 100, 2)
+        if area_mapeada_pixels
+        else 0.0,
+    }
+
+
+def _normalize_class_list(values: list | None) -> list[str]:
+    if not isinstance(values, list):
+        return []
+
+    order = {meta["slug"]: class_id for class_id, meta in CLASS_MAP.items()}
+    normalized = {str(value) for value in values}
+    return sorted((slug for slug in normalized if slug in order), key=lambda slug: order[slug])
+
+
+def _normalize_numeric_map(values: dict | None) -> dict[str, str]:
+    if not isinstance(values, dict):
+        return {}
+
+    valid_slugs = {meta["slug"] for meta in CLASS_MAP.values()}
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in values.items():
+        value = str(raw_value)
+        if value in valid_slugs:
+            normalized[str(raw_key)] = value
+    return normalized
+
+
+def _normalize_pixel_stats(values: dict | None) -> dict:
+    if not isinstance(values, dict):
+        return values or {}
+
+    counts = _normalize_class_counts(values.get("counts"))
+    total_pixels = values.get("total_pixels")
+    if not isinstance(total_pixels, int):
+        total_pixels = sum(counts.values())
+
+    percentages = {
+        slug: round((count / total_pixels) * 100, 2) if total_pixels else 0.0
+        for slug, count in counts.items()
+    }
+    return {
+        **values,
+        "total_pixels": total_pixels,
+        "counts": counts,
+        "percentages": percentages,
+        "coffee_metrics": _build_current_metrics(counts, total_pixels),
+    }
+
+
+def normalize_annotation_payload(payload: dict) -> dict:
+    normalized = dict(payload)
+    normalized["annotation_classes"] = _normalize_class_list(payload.get("annotation_classes"))
+    normalized["annotation_numeric_map"] = _normalize_numeric_map(payload.get("annotation_numeric_map"))
+    normalized["pixel_stats"] = _normalize_pixel_stats(payload.get("pixel_stats"))
+    return normalized
+
+
+def normalize_inference_payload(payload: dict) -> dict:
+    normalized = dict(payload)
+    counts = _normalize_class_counts(payload.get("counts"))
+    total_pixels = payload.get("total_pixels")
+    if not isinstance(total_pixels, int):
+        total_pixels = sum(counts.values())
+
+    percentages = {
+        slug: round((count / total_pixels) * 100, 2) if total_pixels else 0.0
+        for slug, count in counts.items()
+    }
+    normalized.update(
+        {
+            "total_pixels": total_pixels,
+            "counts": counts,
+            "percentages": percentages,
+            **_build_current_metrics(counts, total_pixels),
+        }
+    )
+    return normalized
+
+
 def annotation_bundle(sample_id: str) -> dict[str, Path]:
     return {
         "image": ANNOTATION_IMAGES_DIR / f"{sample_id}.png",
@@ -133,6 +253,7 @@ def ensure_preview_image(source_path: Path, preview_path: Path) -> Path:
 
 
 def serialize_annotation_record(payload: dict) -> dict:
+    payload = normalize_annotation_payload(payload)
     sample_id = payload["id"]
     bundle = annotation_bundle(sample_id)
     image_preview_path = ensure_preview_image(bundle["image"], bundle["image_preview"])
@@ -165,7 +286,7 @@ def load_annotation_payload(sample_id: str) -> dict | None:
     metadata_path = annotation_bundle(sample_id)["metadata"]
     if not metadata_path.exists():
         return None
-    return read_json(metadata_path)
+    return normalize_annotation_payload(read_json(metadata_path))
 
 
 def load_annotation_record(sample_id: str) -> dict | None:
@@ -178,7 +299,7 @@ def load_annotation_record(sample_id: str) -> dict | None:
 def list_annotation_payloads(*, offset: int = 0, limit: int | None = None) -> list[dict]:
     metadata_paths = list_annotation_metadata_paths()
     end = None if limit is None else offset + limit
-    return [read_json(path) for path in metadata_paths[offset:end]]
+    return [normalize_annotation_payload(read_json(path)) for path in metadata_paths[offset:end]]
 
 
 def list_annotation_records(*, offset: int = 0, limit: int | None = None) -> list[dict]:
@@ -193,7 +314,7 @@ def list_inference_records() -> list[dict]:
     ensure_storage()
     records: list[dict] = []
     for metadata_path in sorted(INFERENCES_DIR.glob("*/result.json"), reverse=True):
-        payload = read_json(metadata_path)
+        payload = normalize_inference_payload(read_json(metadata_path))
         run_id = payload["id"]
         bundle = inference_bundle(run_id)
         image_preview_path = ensure_preview_image(bundle["image"], bundle["image_preview"])

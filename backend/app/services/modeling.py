@@ -340,12 +340,6 @@ def calculate_inference_payload(class_mask: np.ndarray) -> dict:
     return {
         **distribution,
         **coffee_metrics,
-        "area_cafe_percentual": coffee_metrics["cafe_percentual_na_imagem"],
-        "fruto_percentual_na_area_cafe": coffee_metrics["fruto_percentual_no_cafe"],
-        "folhagem_percentual_na_area_cafe": coffee_metrics["folhagem_percentual_no_cafe"],
-        "fruto_percentual_na_imagem": distribution["percentages"]["fruto"],
-        "folhagem_percentual_na_imagem": distribution["percentages"]["folhagem"],
-        "fundo_percentual_na_imagem": coffee_metrics["descarte_percentual_na_imagem"],
     }
 
 

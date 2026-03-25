@@ -9,9 +9,9 @@ URL_ROOT_DIR = STORAGE_DIR.parent
 
 
 CLASS_MAP = {
-    0: {"slug": "fundo", "label": "Fundo", "color": (229, 78, 78)},
-    1: {"slug": "folhagem", "label": "Folhagem", "color": (109, 201, 255)},
-    2: {"slug": "fruto", "label": "Fruto", "color": (245, 210, 74)},
+    0: {"slug": "fundo", "label": "Fundo", "color": (229, 78, 78), "draw_order": 0},
+    1: {"slug": "cafe", "label": "Cafe", "color": (196, 137, 78), "draw_order": 2},
+    2: {"slug": "planta", "label": "Planta", "color": (104, 181, 106), "draw_order": 1},
 }
 
 
