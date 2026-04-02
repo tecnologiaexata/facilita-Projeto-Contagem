@@ -18,6 +18,7 @@ from app.config import (
     ANNOTATION_OVERLAY_PREVIEWS_DIR,
     ANNOTATION_TEXTS_DIR,
     CLASS_MAP,
+    CLASS_SLUG_ALIASES,
     CVAT_DIR,
     DATASET_SPLIT_DIR,
     INFERENCES_DIR,
@@ -80,6 +81,11 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _canonical_class_slug(raw_value: str) -> str:
+    slug = str(raw_value).strip().lower()
+    return CLASS_SLUG_ALIASES.get(slug, slug)
+
+
 def _empty_class_counts() -> dict[str, int]:
     return {
         meta["slug"]: 0
@@ -93,7 +99,7 @@ def _normalize_class_counts(values: dict | None) -> dict[str, int]:
         return normalized
 
     for raw_slug, raw_value in values.items():
-        slug = str(raw_slug)
+        slug = _canonical_class_slug(raw_slug)
         if slug not in normalized or not isinstance(raw_value, (int, float)):
             continue
         normalized[slug] += int(raw_value)
@@ -102,28 +108,36 @@ def _normalize_class_counts(values: dict | None) -> dict[str, int]:
 
 
 def _build_current_metrics(counts: dict[str, int], total_pixels: int) -> dict:
-    cafe_pixels = counts["cafe"]
+    coffee_pixels = counts["coffee"]
     planta_pixels = counts["planta"]
     fundo_pixels = counts["fundo"]
-    area_mapeada_pixels = cafe_pixels + planta_pixels
-    return {
-        "cafe_pixels": cafe_pixels,
+    area_mapeada_pixels = coffee_pixels + planta_pixels
+    metrics = {
+        "coffee_pixels": coffee_pixels,
         "planta_pixels": planta_pixels,
         "fundo_pixels": fundo_pixels,
         "area_mapeada_pixels": area_mapeada_pixels,
-        "cafe_percentual_na_imagem": round((cafe_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
+        "coffee_percentual_na_imagem": round((coffee_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
         "planta_percentual_na_imagem": round((planta_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
         "fundo_percentual_na_imagem": round((fundo_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
         "area_mapeada_percentual_na_imagem": round((area_mapeada_pixels / total_pixels) * 100, 2)
         if total_pixels
         else 0.0,
-        "cafe_percentual_na_area_mapeada": round((cafe_pixels / area_mapeada_pixels) * 100, 2)
+        "coffee_percentual_na_area_mapeada": round((coffee_pixels / area_mapeada_pixels) * 100, 2)
         if area_mapeada_pixels
         else 0.0,
         "planta_percentual_na_area_mapeada": round((planta_pixels / area_mapeada_pixels) * 100, 2)
         if area_mapeada_pixels
         else 0.0,
     }
+    metrics.update(
+        {
+            "cafe_pixels": metrics["coffee_pixels"],
+            "cafe_percentual_na_imagem": metrics["coffee_percentual_na_imagem"],
+            "cafe_percentual_na_area_mapeada": metrics["coffee_percentual_na_area_mapeada"],
+        }
+    )
+    return metrics
 
 
 def _normalize_class_list(values: list | None) -> list[str]:
@@ -131,7 +145,7 @@ def _normalize_class_list(values: list | None) -> list[str]:
         return []
 
     order = {meta["slug"]: class_id for class_id, meta in CLASS_MAP.items()}
-    normalized = {str(value) for value in values}
+    normalized = {_canonical_class_slug(value) for value in values}
     return sorted((slug for slug in normalized if slug in order), key=lambda slug: order[slug])
 
 
@@ -142,7 +156,7 @@ def _normalize_numeric_map(values: dict | None) -> dict[str, str]:
     valid_slugs = {meta["slug"] for meta in CLASS_MAP.values()}
     normalized: dict[str, str] = {}
     for raw_key, raw_value in values.items():
-        value = str(raw_value)
+        value = _canonical_class_slug(raw_value)
         if value in valid_slugs:
             normalized[str(raw_key)] = value
     return normalized

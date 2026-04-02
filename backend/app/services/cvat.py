@@ -1,10 +1,11 @@
 import xml.etree.ElementTree as ET
+from io import BytesIO
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from app.config import CLASS_MAP
+from app.config import ANNOTATED_CLASS_IDS, CLASS_MAP
 from app.services.storage import ensure_directory
 
 
@@ -25,8 +26,8 @@ def export_cvat_for_mask(
     class_mask: np.ndarray,
     width: int,
     height: int,
-    destination: Path,
-) -> None:
+    destination: Path | None = None,
+) -> bytes:
     root = ET.Element("annotations")
     ET.SubElement(root, "version").text = "1.1"
 
@@ -36,7 +37,8 @@ def export_cvat_for_mask(
     ET.SubElement(task, "name").text = f"facilita-coffee-{sample_id}"
     ET.SubElement(task, "size").text = "1"
     labels = ET.SubElement(task, "labels")
-    for class_id, class_meta in CLASS_MAP.items():
+    for class_id in ANNOTATED_CLASS_IDS:
+        class_meta = CLASS_MAP[class_id]
         label = ET.SubElement(labels, "label")
         ET.SubElement(label, "name").text = class_meta["slug"]
         ET.SubElement(label, "color").text = "#{:02x}{:02x}{:02x}".format(*class_meta["color"])
@@ -54,9 +56,8 @@ def export_cvat_for_mask(
         },
     )
 
-    for class_id, class_meta in CLASS_MAP.items():
-        if class_id == 0:
-            continue
+    for class_id in ANNOTATED_CLASS_IDS:
+        class_meta = CLASS_MAP[class_id]
         binary_mask = (class_mask == class_id).astype(np.uint8)
         contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for contour in contours:
@@ -77,6 +78,13 @@ def export_cvat_for_mask(
                 },
             )
 
-    ensure_directory(destination.parent)
+    buffer = BytesIO()
     tree = ET.ElementTree(root)
-    tree.write(destination, encoding="utf-8", xml_declaration=True)
+    tree.write(buffer, encoding="utf-8", xml_declaration=True)
+    payload = buffer.getvalue()
+
+    if destination is not None:
+        ensure_directory(destination.parent)
+        destination.write_bytes(payload)
+
+    return payload

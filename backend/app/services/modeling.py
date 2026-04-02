@@ -21,6 +21,7 @@ from app.services.annotation import (
     compute_pixel_distribution,
 )
 from app.services.monitoring import list_active_tasks, list_recent_tasks, tracked_task
+from app.services.remote_assets import fetch_remote_image
 from app.services.storage import (
     annotation_bundle,
     class_catalog,
@@ -343,6 +344,46 @@ def calculate_inference_payload(class_mask: np.ndarray) -> dict:
     }
 
 
+def run_inference_from_image(source: Image.Image, original_filename: str) -> dict:
+    model = ensure_model_ready()
+    image_rgb = np.array(source)
+    features = build_features(image_rgb)
+    prediction = model.classifier.predict(features).reshape(image_rgb.shape[:2]).astype(np.uint8)
+
+    color_mask = build_color_mask(prediction)
+    overlay = build_overlay(image_rgb, prediction)
+    run_id = make_asset_id("infer")
+    bundle = inference_bundle(run_id)
+    ensure_directory(bundle["base"])
+
+    source.save(bundle["image"])
+    Image.fromarray(prediction, mode="L").save(bundle["mask"])
+    Image.fromarray(color_mask).save(bundle["color_mask"])
+    Image.fromarray(overlay).save(bundle["overlay"])
+
+    metrics = calculate_inference_payload(prediction)
+    payload = {
+        "id": run_id,
+        "storage_key": run_id,
+        "original_filename": original_filename,
+        "created_at": now_iso(),
+        "trained_at": model.trained_at,
+        "width": source.width,
+        "height": source.height,
+        **metrics,
+    }
+    write_json(bundle["metadata"], payload)
+    return {
+        **payload,
+        "image_url": f"/storage/inferences/{run_id}/input.png",
+        "image_preview_url": storage_url(ensure_preview_image(bundle["image"], bundle["image_preview"])),
+        "mask_url": f"/storage/inferences/{run_id}/mask.png",
+        "color_mask_url": f"/storage/inferences/{run_id}/colored_mask.png",
+        "overlay_url": f"/storage/inferences/{run_id}/overlay.png",
+        "overlay_preview_url": storage_url(ensure_preview_image(bundle["overlay"], bundle["overlay_preview"])),
+    }
+
+
 def run_inference(image_file: UploadFile) -> dict:
     with tracked_task(
         kind="inference",
@@ -350,49 +391,29 @@ def run_inference(image_file: UploadFile) -> dict:
         metadata={"filename": image_file.filename or "imagem.png"},
     ) as task:
         task.update(phase="Carregando modelo")
-        model = ensure_model_ready()
+        ensure_model_ready()
         task.update(phase="Lendo imagem")
         source = read_image_upload(image_file)
-        image_rgb = np.array(source)
-        features = build_features(image_rgb)
-
         task.update(phase="Segmentando imagem")
-        prediction = model.classifier.predict(features).reshape(image_rgb.shape[:2]).astype(np.uint8)
+        result = run_inference_from_image(source, image_file.filename or "imagem.png")
+        task.update(phase="Concluido", metadata={"run_id": result["id"]})
+        return result
 
-        color_mask = build_color_mask(prediction)
-        overlay = build_overlay(image_rgb, prediction)
-        run_id = make_asset_id("infer")
-        bundle = inference_bundle(run_id)
-        ensure_directory(bundle["base"])
 
-        task.update(phase="Salvando resultados", metadata={"run_id": run_id})
-        source.save(bundle["image"])
-        Image.fromarray(prediction, mode="L").save(bundle["mask"])
-        Image.fromarray(color_mask).save(bundle["color_mask"])
-        Image.fromarray(overlay).save(bundle["overlay"])
-
-        metrics = calculate_inference_payload(prediction)
-        payload = {
-            "id": run_id,
-            "storage_key": run_id,
-            "original_filename": image_file.filename or "imagem.png",
-            "created_at": now_iso(),
-            "trained_at": model.trained_at,
-            "width": source.width,
-            "height": source.height,
-            **metrics,
-        }
-        write_json(bundle["metadata"], payload)
-        task.update(phase="Concluido")
-        return {
-            **payload,
-            "image_url": f"/storage/inferences/{run_id}/input.png",
-            "image_preview_url": storage_url(ensure_preview_image(bundle["image"], bundle["image_preview"])),
-            "mask_url": f"/storage/inferences/{run_id}/mask.png",
-            "color_mask_url": f"/storage/inferences/{run_id}/colored_mask.png",
-            "overlay_url": f"/storage/inferences/{run_id}/overlay.png",
-            "overlay_preview_url": storage_url(ensure_preview_image(bundle["overlay"], bundle["overlay_preview"])),
-        }
+def run_inference_from_url(image_url: str) -> dict:
+    with tracked_task(
+        kind="inference_remote",
+        label="Inferencia em imagem remota",
+        metadata={"image_url": image_url},
+    ) as task:
+        task.update(phase="Carregando modelo")
+        ensure_model_ready()
+        task.update(phase="Baixando imagem remota")
+        source, filename = fetch_remote_image(image_url, fallback_filename="imagem-remota.png")
+        task.update(phase="Segmentando imagem remota")
+        result = run_inference_from_image(source, filename)
+        task.update(phase="Concluido", metadata={"run_id": result["id"]})
+        return result
 
 
 def delete_inference(run_id: str) -> dict:

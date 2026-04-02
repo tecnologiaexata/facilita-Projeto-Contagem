@@ -2,19 +2,27 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-from app.config import STORAGE_DIR
+from app.config import APP_VERSION, STORAGE_DIR
 from app.services.annotation import (
     annotations_summary,
     build_annotation_package,
     delete_annotation,
     save_annotation,
+    save_annotation_from_urls,
+)
+from app.services.control_plane import (
+    control_plane_status,
+    start_control_plane_heartbeat,
+    stop_control_plane_heartbeat,
 )
 from app.services.modeling import (
     MODEL_PATH,
     build_model_download_filename,
     delete_inference,
     run_inference,
+    run_inference_from_url,
     start_training_job,
     training_status,
 )
@@ -30,7 +38,7 @@ from app.services.storage import (
 
 ensure_storage()
 
-app = FastAPI(title="Facilita Coffee Counter", version="0.1.0")
+app = FastAPI(title="Facilita Coffee Counter", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,9 +49,31 @@ app.add_middleware(
 app.mount("/storage", StaticFiles(directory=STORAGE_DIR), name="storage")
 
 
+class RemoteGalleryPayload(BaseModel):
+    image_url: str
+    annotation_txt_url: str | None = None
+    mask_image_url: str | None = None
+    sample_id: str | None = None
+    request_id: str | None = None
+
+
+class RemoteInferencePayload(BaseModel):
+    image_url: str
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    start_control_plane_heartbeat()
+
+
+@app.on_event("shutdown")
+def on_shutdown() -> None:
+    stop_control_plane_heartbeat()
+
+
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "version": APP_VERSION}
 
 
 @app.get("/api/meta")
@@ -52,7 +82,13 @@ def meta() -> dict:
         "classes": class_catalog(),
         "summary": annotations_summary(),
         "training": training_status(),
+        "worker": control_plane_status(),
     }
+
+
+@app.get("/api/worker")
+def worker_meta() -> dict:
+    return {"item": control_plane_status()}
 
 
 def _gallery_payload(offset: int = 0, limit: int | None = None) -> dict:
@@ -110,6 +146,30 @@ def create_annotation(
         annotation_file=annotation_txt,
         sample_id=sample_id,
         request_id=request_id,
+    )
+    return {"item": record}
+
+
+@app.post("/api/gallery/from-url")
+def create_gallery_item_from_url(payload: RemoteGalleryPayload) -> dict:
+    record = save_annotation_from_urls(
+        image_url=payload.image_url,
+        annotation_txt_url=payload.annotation_txt_url,
+        mask_image_url=payload.mask_image_url,
+        sample_id=payload.sample_id,
+        request_id=payload.request_id,
+    )
+    return {"item": record}
+
+
+@app.post("/api/annotations/from-url")
+def create_annotation_from_url(payload: RemoteGalleryPayload) -> dict:
+    record = save_annotation_from_urls(
+        image_url=payload.image_url,
+        annotation_txt_url=payload.annotation_txt_url,
+        mask_image_url=payload.mask_image_url,
+        sample_id=payload.sample_id,
+        request_id=payload.request_id,
     )
     return {"item": record}
 
@@ -191,3 +251,8 @@ def download_training_model() -> FileResponse:
 @app.post("/api/inference")
 def create_inference(image: UploadFile = File(...)) -> dict:
     return {"item": run_inference(image)}
+
+
+@app.post("/api/inference/from-url")
+def create_inference_from_url(payload: RemoteInferencePayload) -> dict:
+    return {"item": run_inference_from_url(payload.image_url)}

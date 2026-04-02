@@ -8,9 +8,10 @@ import numpy as np
 from fastapi import HTTPException, UploadFile
 from PIL import Image, ImageDraw
 
-from app.config import CLASS_MAP
+from app.config import ANNOTATED_CLASS_IDS, CLASS_MAP, CLASS_SLUG_ALIASES, INFERRED_CLASS_ID
 from app.services.monitoring import tracked_task
 from app.services.cvat import export_cvat_for_mask
+from app.services.remote_assets import fetch_remote_image, fetch_remote_text
 from app.services.storage import (
     annotation_bundle,
     list_annotation_payloads,
@@ -30,11 +31,12 @@ from app.services.storage import (
 MASK_LEVELS = np.array([0, 85, 170], dtype=np.uint8)
 YOLO_SEGMENTATION_HINT = (
     "Use linhas no formato YOLO de poligono ou bounding box. "
-    "Exemplo: 'cafe 0.10 0.20 0.30 0.40 0.50 0.25' ou "
-    "'planta 0.52 0.41 0.08 0.10'. "
+    "Exemplo: 'fundo 0.10 0.20 0.30 0.40 0.50 0.25' ou "
+    "'coffee 0.52 0.41 0.08 0.10'. "
     "Para ids numericos ambiguos, adicione um cabecalho como "
-    "'# class-map: 0=cafe, 1=planta'."
+    "'# class-map: 0=fundo, 1=coffee'."
 )
+PLANT_ANNOTATION_HINT = "A classe planta nao deve ser anotada manualmente; ela e inferida por exclusao."
 
 CLASS_NAME_TO_ID = {
     "background": 0,
@@ -43,6 +45,7 @@ CLASS_NAME_TO_ID = {
     "fundo": 0,
     "cafe": 1,
     "coffee": 1,
+    "coffe": 1,
     "grao": 1,
     "graos": 1,
     "planta": 2,
@@ -111,7 +114,8 @@ def build_overlay(image_rgb: np.ndarray, class_mask: np.ndarray, alpha: float = 
 def _normalize_label_key(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value or "")
     without_accents = "".join(char for char in normalized if not unicodedata.combining(char))
-    return re.sub(r"[^a-zA-Z0-9]+", "_", without_accents).strip("_").lower()
+    key = re.sub(r"[^a-zA-Z0-9]+", "_", without_accents).strip("_").lower()
+    return CLASS_SLUG_ALIASES.get(key, key)
 
 
 def _parse_header_numeric_map(raw_line: str) -> dict[int, int] | None:
@@ -164,19 +168,14 @@ def _resolve_numeric_class_map(shapes: list[dict], explicit_map: dict[int, int])
             )
         return explicit_map
 
-    unsupported_labels = [label for label in numeric_labels if label not in {0, 1, 2}]
+    unsupported_labels = [label for label in numeric_labels if label not in {0, 1}]
     if unsupported_labels:
         raise create_http_error(
             "Foram encontrados ids numericos fora do intervalo suportado. "
             f"{YOLO_SEGMENTATION_HINT}"
         )
 
-    label_set = set(numeric_labels)
-    if label_set == {0, 1}:
-        return {0: 1, 1: 2}
-    if label_set.issubset({1, 2}):
-        return {1: 1, 2: 2}
-    return {0: 0, 1: 1, 2: 2}
+    return {label: label for label in numeric_labels}
 
 
 def _resolve_class_id(label_token: str, numeric_map: dict[int, int], line_number: int) -> int:
@@ -193,7 +192,11 @@ def _resolve_class_id(label_token: str, numeric_map: dict[int, int], line_number
     if class_id is None:
         raise create_http_error(
             f"Linha {line_number}: classe '{label_token}' nao reconhecida. "
-            "Use fundo, cafe ou planta."
+            "Use apenas fundo ou coffee."
+        )
+    if class_id not in ANNOTATED_CLASS_IDS:
+        raise create_http_error(
+            f"Linha {line_number}: a classe '{label_token}' nao pode ser anotada. {PLANT_ANNOTATION_HINT}"
         )
     return class_id
 
@@ -297,24 +300,21 @@ def build_class_mask_from_txt(annotation_text: str, width: int, height: int) -> 
         raise create_http_error(f"Nenhuma anotacao valida foi encontrada no TXT. {YOLO_SEGMENTATION_HINT}")
 
     numeric_map = _resolve_numeric_class_map(shapes, explicit_numeric_map)
-    mask_image = Image.new("L", (width, height), 0)
+    mask_image = Image.new("L", (width, height), int(INFERRED_CLASS_ID))
     draw = ImageDraw.Draw(mask_image)
     used_classes: set[str] = set()
     used_formats: set[str] = set()
-    resolved_shapes_by_class: dict[int, list[dict]] = {class_id: [] for class_id in CLASS_MAP}
+    resolved_shapes_by_class: dict[int, list[dict]] = {class_id: [] for class_id in ANNOTATED_CLASS_IDS}
 
     for shape in shapes:
         class_id = _resolve_class_id(shape["label_token"], numeric_map, shape["line_number"])
         used_classes.add(CLASS_MAP[class_id]["slug"])
         resolved_shapes_by_class.setdefault(class_id, []).append(shape)
 
-    class_order = [
-        class_id
-        for class_id, _ in sorted(
-            CLASS_MAP.items(),
-            key=lambda item: (item[1].get("draw_order", item[0]), item[0]),
-        )
-    ]
+    class_order = sorted(
+        ANNOTATED_CLASS_IDS,
+        key=lambda class_id: (CLASS_MAP[class_id].get("draw_order", class_id), class_id),
+    )
 
     for class_id in class_order:
         for shape in resolved_shapes_by_class.get(class_id, []):
@@ -352,28 +352,92 @@ def compute_pixel_distribution(class_mask: np.ndarray) -> dict:
 
 
 def compute_coffee_metrics(counts: dict[str, int], total_pixels: int) -> dict:
-    cafe_pixels = counts["cafe"]
+    coffee_pixels = counts["coffee"]
     planta_pixels = counts["planta"]
     fundo_pixels = counts["fundo"]
-    area_mapeada_pixels = cafe_pixels + planta_pixels
-    return {
-        "cafe_pixels": cafe_pixels,
+    area_mapeada_pixels = coffee_pixels + planta_pixels
+    metrics = {
+        "coffee_pixels": coffee_pixels,
         "planta_pixels": planta_pixels,
         "fundo_pixels": fundo_pixels,
         "area_mapeada_pixels": area_mapeada_pixels,
-        "cafe_percentual_na_imagem": round((cafe_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
+        "coffee_percentual_na_imagem": round((coffee_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
         "planta_percentual_na_imagem": round((planta_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
         "fundo_percentual_na_imagem": round((fundo_pixels / total_pixels) * 100, 2) if total_pixels else 0.0,
         "area_mapeada_percentual_na_imagem": round((area_mapeada_pixels / total_pixels) * 100, 2)
         if total_pixels
         else 0.0,
-        "cafe_percentual_na_area_mapeada": round((cafe_pixels / area_mapeada_pixels) * 100, 2)
+        "coffee_percentual_na_area_mapeada": round((coffee_pixels / area_mapeada_pixels) * 100, 2)
         if area_mapeada_pixels
         else 0.0,
         "planta_percentual_na_area_mapeada": round((planta_pixels / area_mapeada_pixels) * 100, 2)
         if area_mapeada_pixels
         else 0.0,
     }
+    metrics.update(
+        {
+            "cafe_pixels": metrics["coffee_pixels"],
+            "cafe_percentual_na_imagem": metrics["coffee_percentual_na_imagem"],
+            "cafe_percentual_na_area_mapeada": metrics["coffee_percentual_na_area_mapeada"],
+        }
+    )
+    return metrics
+
+
+def persist_annotation_from_inputs(
+    source_image: Image.Image,
+    *,
+    original_filename: str,
+    sample_id: str | None = None,
+    request_id: str | None = None,
+    mask_image: Image.Image | None = None,
+    annotation_text: str | None = None,
+) -> dict:
+    resolved_sample_id = sample_id or (
+        make_stable_asset_id("annot", request_id) if request_id else make_asset_id("annot")
+    )
+    existing_record = load_annotation_record(resolved_sample_id) if not sample_id and request_id else None
+    if existing_record is not None:
+        return existing_record
+
+    extra_payload: dict = {}
+    serialized_annotation_text: str | None = None
+    if annotation_text is not None:
+        class_mask, annotation_meta = build_class_mask_from_txt(
+            annotation_text,
+            source_image.width,
+            source_image.height,
+        )
+        serialized_annotation_text = annotation_text
+        extra_payload = {
+            "source_type": "external_txt",
+            "annotation_source": "third_party_txt",
+            **annotation_meta,
+        }
+    elif mask_image is not None:
+        resized_mask = mask_image
+        if resized_mask.size != source_image.size:
+            resized_mask = resized_mask.resize(source_image.size, Image.Resampling.NEAREST)
+        class_mask = decode_mask(resized_mask)
+        extra_payload = {
+            "source_type": "legacy_manual",
+            "annotation_source": "internal_editor",
+        }
+    else:
+        raise create_http_error("Envie uma mascara ou um TXT de anotacao para salvar o item.")
+
+    if request_id:
+        extra_payload["request_id"] = request_id
+
+    return persist_annotation_record(
+        source_image,
+        class_mask,
+        sample_id=resolved_sample_id,
+        original_filename=original_filename,
+        file_label=slugify_name(original_filename or resolved_sample_id or "imagem"),
+        extra_payload=extra_payload,
+        annotation_text=serialized_annotation_text,
+    )
 
 
 def persist_annotation_record(
@@ -469,60 +533,81 @@ def save_annotation(
             "input_kind": input_kind,
         },
     ) as task:
-        resolved_sample_id = sample_id or (
-            make_stable_asset_id("annot", request_id) if request_id else make_asset_id("annot")
-        )
-        existing_record = load_annotation_record(resolved_sample_id) if not sample_id and request_id else None
-        if existing_record is not None:
-            task.update(
-                phase="Retornando item ja persistido",
-                metadata={"sample_id": existing_record["id"]},
-            )
-            return existing_record
-
         task.update(phase="Lendo imagem")
         source_image = read_upload_image(image_file)
-
-        extra_payload: dict = {}
+        mask_image: Image.Image | None = None
         annotation_text: str | None = None
         if annotation_file is not None:
             task.update(phase="Lendo anotacao TXT")
             annotation_text = read_upload_text(annotation_file)
             task.update(phase="Convertendo TXT em mascara")
-            class_mask, annotation_meta = build_class_mask_from_txt(
-                annotation_text,
-                source_image.width,
-                source_image.height,
-            )
-            extra_payload = {
-                "source_type": "external_txt",
-                "annotation_source": "third_party_txt",
-                **annotation_meta,
-            }
         elif mask_file is not None:
             task.update(phase="Lendo mascara legada")
             mask_image = read_upload_image(mask_file)
-            if mask_image.size != source_image.size:
-                mask_image = mask_image.resize(source_image.size, Image.Resampling.NEAREST)
-            class_mask = decode_mask(mask_image)
-            extra_payload = {
-                "source_type": "legacy_manual",
-                "annotation_source": "internal_editor",
-            }
         else:
             raise create_http_error("Envie uma mascara ou um TXT de anotacao para salvar o item.")
 
-        if request_id:
-            extra_payload["request_id"] = request_id
+        task.update(phase="Persistindo item")
+        record = persist_annotation_from_inputs(
+            source_image,
+            original_filename=image_file.filename or "imagem.png",
+            sample_id=sample_id,
+            request_id=request_id,
+            mask_image=mask_image,
+            annotation_text=annotation_text,
+        )
+        task.update(phase="Concluido", metadata={"sample_id": record["id"]})
+        return record
+
+
+def save_annotation_from_urls(
+    *,
+    image_url: str,
+    annotation_txt_url: str | None = None,
+    mask_image_url: str | None = None,
+    sample_id: str | None = None,
+    request_id: str | None = None,
+) -> dict:
+    input_kind = "external_txt_url" if annotation_txt_url is not None else "manual_mask_url"
+    with tracked_task(
+        kind="annotation_remote",
+        label="Salvar item da galeria por URL",
+        metadata={
+            "image_url": image_url,
+            "annotation_txt_url": annotation_txt_url,
+            "mask_image_url": mask_image_url,
+            "request_id": request_id,
+            "input_kind": input_kind,
+        },
+    ) as task:
+        task.update(phase="Baixando imagem remota")
+        source_image, source_filename = fetch_remote_image(image_url, fallback_filename="imagem-remota.png")
+        annotation_text: str | None = None
+        mask_image: Image.Image | None = None
+
+        if annotation_txt_url is not None:
+            task.update(phase="Baixando anotacao TXT remota")
+            annotation_text, _ = fetch_remote_text(
+                annotation_txt_url,
+                fallback_filename="anotacao-remota.txt",
+            )
+            task.update(phase="Convertendo TXT remoto em mascara")
+        elif mask_image_url is not None:
+            task.update(phase="Baixando mascara remota")
+            mask_image, _ = fetch_remote_image(
+                mask_image_url,
+                fallback_filename="mascara-remota.png",
+            )
+        else:
+            raise create_http_error("Envie annotation_txt_url ou mask_image_url para salvar por URL.")
 
         task.update(phase="Persistindo item")
-        record = persist_annotation_record(
+        record = persist_annotation_from_inputs(
             source_image,
-            class_mask,
-            sample_id=resolved_sample_id,
-            original_filename=image_file.filename or None,
-            file_label=slugify_name(image_file.filename or resolved_sample_id or "imagem"),
-            extra_payload=extra_payload,
+            original_filename=source_filename,
+            sample_id=sample_id,
+            request_id=request_id,
+            mask_image=mask_image,
             annotation_text=annotation_text,
         )
         task.update(phase="Concluido", metadata={"sample_id": record["id"]})
