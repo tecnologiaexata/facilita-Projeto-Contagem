@@ -1,58 +1,68 @@
 # Facilita Projeto Coffee Backend
 
-Worker de processamento para rodar na `Vast.ai`.
+Worker Python puro para rodar na `Vast.ai`, sem Docker.
 
 ## Papel deste repositorio
 
-- recebe importacao de galeria e inferencia
-- processa imagens locais ou remotas por URL
-- treina o modelo de segmentacao
-- mantem heartbeat com o frontend/control plane na `Vercel`
-- faz polling assincrono da fila de jobs do control plane
-- sobe artefatos finais direto no `Blob`
+- atuar como worker da fila assincrona
+- buscar jobs no frontend/control plane
+- baixar entradas do `Blob`
+- processar importacao de anotacoes, treino e inferencia
+- subir os artefatos finais direto no `Blob`
+- reportar `complete` ou `fail` para o frontend
+
+O frontend principal da arquitetura fica no repositorio separado `Facilita-Projeto-Coffee-Frontend`.
 
 ## Convencao de anotacao
 
-As classes agora seguem esta regra:
-
 - `0 = fundo`
 - `1 = coffee`
-- `planta` nao e anotada manualmente
+- `planta` nunca e anotada manualmente
 
-Tudo o que nao estiver anotado como `fundo` ou `coffee` passa a ser tratado como `planta` por exclusao.
+Tudo o que nao for anotado como `fundo` ou `coffee` vira `planta` por exclusao.
 
-## Endpoints principais
+## Endpoints disponiveis
 
 - `GET /api/health`
 - `GET /api/meta`
 - `GET /api/worker`
-- `POST /api/gallery`
-- `POST /api/gallery/from-url`
-- `POST /api/inference`
-- `POST /api/inference/from-url`
-- `POST /api/training/run`
+- `GET /api/monitoring`
 
-## Modelo assincrono
+## Como rodar sem Docker
 
-- o frontend na Vercel cria jobs no Postgres
-- o worker da Vast.ai envia heartbeat para se registrar como `online`
-- o mesmo worker consulta a fila em polling, busca o `context` do job e processa os jobs pendentes
-- os arquivos de entrada sao baixados temporariamente e os artefatos finais vao para o `Blob`
-- ao concluir, ele reporta `complete` ou `fail` para o control plane, que persiste apenas metadados/manifests no Postgres
+1. Crie um ambiente virtual.
+2. Instale as dependencias de [backend/requirements.txt](/home/renatoolegrio/Documentos/GitHub/facilita-Projeto-Coffee/backend/requirements.txt).
+3. Copie [.env.example](/home/renatoolegrio/Documentos/GitHub/facilita-Projeto-Coffee/.env.example) para `.env`.
+4. Suba o worker com:
 
-## Ambiente
+```bash
+python3 run_worker.py --port 8050
+```
 
-Copie as variaveis de `.env.example` e ajuste:
+Se preferir, tambem pode controlar por ambiente:
 
-- `CONTROL_PLANE_URL`: URL do frontend na Vercel
-- `WORKER_PUBLIC_URL`: URL publica atual do worker na Vast.ai
-- `WORKER_SHARED_TOKEN`: token compartilhado com a Vercel
-- `WORKER_JOB_POLL_ENABLED`: habilita o consumo assincrono da fila
-- `WORKER_JOB_POLL_INTERVAL_SECONDS`: intervalo de polling dos jobs
-- `BLOB_READ_WRITE_TOKEN`: token de escrita/leitura do Blob
-- `BLOB_ACCESS`: `public` ou `private` para os artefatos definitivos
-- `REMOTE_FETCH_ALLOWED_HOSTS`: lista opcional de hosts permitidos para baixar imagens/TXT
+```bash
+HOST=0.0.0.0 PORT=8050 python3 run_worker.py
+```
 
-## Observacao
+Use `venv` por padrao. Rodar fora dela pode misturar `numpy/scipy/sklearn` do sistema com pacotes instalados pelo `pip`, o que costuma quebrar o worker.
 
-O diretório `frontend/` dentro deste repositorio continua aqui apenas como legado/local. O frontend principal da arquitetura nova fica no repositorio separado `Facilita-Projeto-Coffee-Frontend`.
+## Variaveis principais
+
+- `HOST`: host HTTP do worker
+- `PORT`: porta HTTP do worker
+- `RELOAD`: ativa reload local
+- `LOG_LEVEL`: nivel de log do Uvicorn
+- `CONTROL_PLANE_URL`: URL do frontend/control plane
+- `WORKER_PUBLIC_URL`: URL publica do worker usada no registro/heartbeat
+- `WORKER_SHARED_TOKEN`: token compartilhado com o frontend
+- `BLOB_READ_WRITE_TOKEN`: token do Blob para leitura/escrita dos artefatos
+- `BLOB_ACCESS`: `public` ou `private`
+
+## Fluxo
+
+1. O frontend recebe upload e salva a entrada no Blob.
+2. O frontend cria o job no Postgres.
+3. O worker envia heartbeat e faz polling da fila.
+4. O worker busca o `context` do job, baixa o necessario, processa e sobe os resultados no Blob.
+5. O worker reporta o resultado final para o frontend.

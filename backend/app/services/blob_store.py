@@ -1,12 +1,19 @@
 import json
 import mimetypes
 from io import BytesIO
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
 from vercel.blob import BlobClient
 
 from app.config import BLOB_ACCESS, BLOB_BASE_URL, BLOB_READ_WRITE_TOKEN
+from app.logging_utils import get_logger
+
+
+logger = get_logger("facilita.worker.blob")
+HTTP_CHUNK_SIZE = 1024 * 1024
 
 
 def blob_storage_enabled() -> bool:
@@ -62,14 +69,48 @@ def _stream_to_bytes(stream) -> bytes:
     return b"".join(chunk for chunk in stream)
 
 
+def _download_http_bytes(url: str) -> bytes:
+    request = Request(url, headers={"User-Agent": "facilita-coffee-worker/1.0"})
+    chunks: list[bytes] = []
+    try:
+        with urlopen(request, timeout=60) as response:
+            while True:
+                chunk = response.read(HTTP_CHUNK_SIZE)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    except HTTPError as exc:
+        logger.error("Falha HTTP ao baixar URL do Blob: url=%s status=%s", url, exc.code)
+        raise HTTPException(status_code=404, detail="Blob solicitado nao foi encontrado.") from exc
+    except URLError as exc:
+        logger.error("Falha de rede ao baixar URL do Blob: url=%s reason=%s", url, exc.reason)
+        raise HTTPException(status_code=404, detail="Blob solicitado nao foi encontrado.") from exc
+
+    payload = b"".join(chunks)
+    if not payload:
+        logger.error("URL do Blob retornou vazia: url=%s", url)
+        raise HTTPException(status_code=404, detail="Blob solicitado nao foi encontrado.")
+    return payload
+
+
 def download_blob_bytes(url_or_path: str, *, access: str | None = None) -> bytes:
+    logger.info("Baixando arquivo do Blob: reference=%s access=%s", url_or_path, access or blob_access())
+    parsed = urlparse(url_or_path)
+    if parsed.scheme in {"http", "https"}:
+        payload = _download_http_bytes(url_or_path)
+        logger.info("Arquivo baixado do Blob por URL direta: reference=%s bytes=%s", url_or_path, len(payload))
+        return payload
+
     result = _blob_client().get(
         url_or_path,
         access=access or blob_access(),
     )
     if result is None or getattr(result, "status_code", 200) != 200 or getattr(result, "stream", None) is None:
+        logger.error("Falha ao baixar arquivo do Blob: reference=%s", url_or_path)
         raise HTTPException(status_code=404, detail="Blob solicitado nao foi encontrado.")
-    return _stream_to_bytes(result.stream)
+    payload = _stream_to_bytes(result.stream)
+    logger.info("Arquivo baixado do Blob com sucesso: reference=%s bytes=%s", url_or_path, len(payload))
+    return payload
 
 
 def _normalize_uploaded_blob(uploaded, *, size: int | None = None, access: str | None = None) -> dict:
@@ -98,6 +139,14 @@ def upload_blob_bytes(
     access: str | None = None,
 ) -> dict:
     resolved_content_type = content_type or mimetypes.guess_type(pathname)[0] or "application/octet-stream"
+    logger.info(
+        "Enviando arquivo ao Blob: pathname=%s bytes=%s content_type=%s access=%s overwrite=%s",
+        pathname,
+        len(data),
+        resolved_content_type,
+        access or blob_access(),
+        overwrite,
+    )
     uploaded = _blob_client().put(
         pathname,
         data,
@@ -106,7 +155,13 @@ def upload_blob_bytes(
         overwrite=overwrite,
         add_random_suffix=add_random_suffix,
     )
-    return _normalize_uploaded_blob(uploaded, size=len(data), access=access)
+    normalized = _normalize_uploaded_blob(uploaded, size=len(data), access=access)
+    logger.info(
+        "Arquivo enviado ao Blob com sucesso: pathname=%s url=%s",
+        pathname,
+        normalized.get("url"),
+    )
+    return normalized
 
 
 def upload_json_blob(pathname: str, payload: dict, *, access: str | None = None) -> dict:

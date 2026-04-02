@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -17,13 +16,6 @@ def env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
-
-
-APP_DIR = Path(__file__).resolve().parent
-BACKEND_DIR = APP_DIR.parent
-PROJECT_DIR = BACKEND_DIR.parent if BACKEND_DIR.name == "backend" else BACKEND_DIR
-STORAGE_DIR = PROJECT_DIR / "storage"
-URL_ROOT_DIR = STORAGE_DIR.parent
 
 
 CLASS_MAP = {
@@ -50,42 +42,7 @@ INFERRED_CLASS_ID = next(
 WORKER_CAPABILITIES = ("annotation_import", "training", "inference")
 
 
-ANNOTATIONS_DIR = STORAGE_DIR / "dataset_anotado"
-ANNOTATION_IMAGES_DIR = ANNOTATIONS_DIR / "images"
-ANNOTATION_IMAGE_PREVIEWS_DIR = ANNOTATIONS_DIR / "image_previews"
-ANNOTATION_MASKS_DIR = ANNOTATIONS_DIR / "masks"
-ANNOTATION_COLOR_MASKS_DIR = ANNOTATIONS_DIR / "colored_masks"
-ANNOTATION_OVERLAYS_DIR = ANNOTATIONS_DIR / "overlays"
-ANNOTATION_OVERLAY_PREVIEWS_DIR = ANNOTATIONS_DIR / "overlay_previews"
-ANNOTATION_METADATA_DIR = ANNOTATIONS_DIR / "metadata"
-ANNOTATION_TEXTS_DIR = ANNOTATIONS_DIR / "annotation_texts"
-
-CVAT_DIR = STORAGE_DIR / "cvat"
-DATASET_SPLIT_DIR = STORAGE_DIR / "dataset"
-MODELS_DIR = STORAGE_DIR / "models"
-TRAINING_DIR = STORAGE_DIR / "training"
-INFERENCES_DIR = STORAGE_DIR / "inferences"
-
-
-REQUIRED_DIRS = [
-    STORAGE_DIR,
-    ANNOTATION_IMAGES_DIR,
-    ANNOTATION_IMAGE_PREVIEWS_DIR,
-    ANNOTATION_MASKS_DIR,
-    ANNOTATION_COLOR_MASKS_DIR,
-    ANNOTATION_OVERLAYS_DIR,
-    ANNOTATION_OVERLAY_PREVIEWS_DIR,
-    ANNOTATION_METADATA_DIR,
-    ANNOTATION_TEXTS_DIR,
-    CVAT_DIR,
-    DATASET_SPLIT_DIR,
-    MODELS_DIR,
-    TRAINING_DIR,
-    INFERENCES_DIR,
-]
-
-
-APP_VERSION = os.getenv("APP_VERSION", "0.2.0")
+APP_VERSION = os.getenv("APP_VERSION", "0.3.0")
 BLOB_READ_WRITE_TOKEN = os.getenv("BLOB_READ_WRITE_TOKEN", "").strip()
 BLOB_BASE_URL = os.getenv("BLOB_BASE_URL", "").strip()
 BLOB_ACCESS = "private" if os.getenv("BLOB_ACCESS", "public").strip().lower() == "private" else "public"

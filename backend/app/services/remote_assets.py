@@ -5,16 +5,18 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
-from PIL import Image
+from PIL import Image, ImageOps
 
 from app.config import (
     REMOTE_FETCH_ALLOWED_HOSTS,
     REMOTE_FETCH_MAX_BYTES,
     REMOTE_FETCH_TIMEOUT_SECONDS,
 )
+from app.logging_utils import get_logger
 
 
 CHUNK_SIZE = 1024 * 1024
+logger = get_logger("facilita.worker.remote_assets")
 
 
 def _validate_remote_url(url: str) -> str:
@@ -33,6 +35,12 @@ def _validate_remote_url(url: str) -> str:
 
 def _download_remote_bytes(url: str) -> bytes:
     safe_url = _validate_remote_url(url)
+    logger.info(
+        "Baixando arquivo remoto: url=%s timeout=%s max_bytes=%s",
+        safe_url,
+        REMOTE_FETCH_TIMEOUT_SECONDS,
+        REMOTE_FETCH_MAX_BYTES,
+    )
     request = Request(safe_url, headers={"User-Agent": "facilita-coffee-worker/1.0"})
     total_read = 0
     chunks: list[bytes] = []
@@ -45,6 +53,12 @@ def _download_remote_bytes(url: str) -> bytes:
                     break
                 total_read += len(chunk)
                 if total_read > REMOTE_FETCH_MAX_BYTES:
+                    logger.error(
+                        "Arquivo remoto excedeu o limite configurado: url=%s bytes=%s limit=%s",
+                        safe_url,
+                        total_read,
+                        REMOTE_FETCH_MAX_BYTES,
+                    )
                     raise HTTPException(
                         status_code=413,
                         detail="O arquivo remoto excede o tamanho maximo configurado para download.",
@@ -53,19 +67,24 @@ def _download_remote_bytes(url: str) -> bytes:
     except HTTPException:
         raise
     except HTTPError as exc:
+        logger.error("Falha HTTP ao baixar arquivo remoto: url=%s status=%s", safe_url, exc.code)
         raise HTTPException(
             status_code=400,
             detail=f"Falha ao baixar arquivo remoto. HTTP {exc.code}.",
         ) from exc
     except URLError as exc:
+        logger.error("Falha de rede ao baixar arquivo remoto: url=%s reason=%s", safe_url, exc.reason)
         raise HTTPException(
             status_code=400,
             detail=f"Falha de rede ao baixar arquivo remoto: {exc.reason}",
         ) from exc
 
     if not chunks:
+        logger.error("Arquivo remoto retornou vazio: url=%s", safe_url)
         raise HTTPException(status_code=400, detail="O arquivo remoto retornou vazio.")
-    return b"".join(chunks)
+    payload = b"".join(chunks)
+    logger.info("Arquivo remoto baixado com sucesso: url=%s bytes=%s", safe_url, len(payload))
+    return payload
 
 
 def filename_from_url(url: str, fallback: str) -> str:
@@ -77,9 +96,22 @@ def fetch_remote_image(url: str, fallback_filename: str = "imagem.png") -> tuple
     payload = _download_remote_bytes(url)
     filename = filename_from_url(url, fallback_filename)
     try:
-        image = Image.open(BytesIO(payload)).convert("RGB")
+        image = Image.open(BytesIO(payload))
+        original_size = image.size
+        image = ImageOps.exif_transpose(image)
+        if image.size != original_size:
+            logger.info(
+                "Orientacao EXIF aplicada na imagem remota: url=%s filename=%s from=%s to=%s",
+                url,
+                filename,
+                original_size,
+                image.size,
+            )
+        image = image.convert("RGB")
     except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Falha ao interpretar imagem remota: url=%s filename=%s", url, filename)
         raise HTTPException(status_code=400, detail="Nao foi possivel interpretar a imagem remota.") from exc
+    logger.info("Imagem remota pronta para uso: url=%s filename=%s size=%sx%s", url, filename, image.width, image.height)
     return image, filename
 
 
@@ -92,6 +124,8 @@ def fetch_remote_text(url: str, fallback_filename: str = "anotacao.txt") -> tupl
         except UnicodeDecodeError:
             continue
         if content.strip():
+            logger.info("TXT remoto pronto para uso: url=%s filename=%s encoding=%s", url, filename, encoding)
             return content, filename
 
+    logger.error("Falha ao interpretar TXT remoto: url=%s filename=%s", url, filename)
     raise HTTPException(status_code=400, detail="Nao foi possivel interpretar o TXT remoto.")
