@@ -27,7 +27,7 @@ from app.services.blob_store import (
     upload_json_blob,
 )
 from app.services.cvat import export_cvat_for_mask
-from app.services.gpu_runtime import require_gpu_device
+from app.services.gpu_runtime import normalize_requested_device, require_gpu_device, torch_runtime_info
 from app.services.modeling import build_features, calculate_inference_payload, compute_metrics
 from app.services.yolo_segmentation import (
     build_training_summary,
@@ -722,7 +722,17 @@ def _process_inference(payload: dict, context: dict, report_progress=None) -> di
         raise HTTPException(status_code=400, detail="Job de inferencia precisa de image_url.")
 
     params = resolve_training_params(context)
-    device = require_gpu_device(params.get("device"), operation="Inferencia YOLO Segmentation")
+    requested_device = normalize_requested_device(params.get("device"))
+    runtime = torch_runtime_info()
+    if runtime.get("cuda_available"):
+        device = requested_device
+    else:
+        device = "cpu"
+        logger.warning(
+            "CUDA indisponivel neste worker para inferencia; executando fallback em CPU. requested_device=%s runtime=%s",
+            requested_device,
+            runtime,
+        )
     output = context.get("output") or {}
     inference_run_id = _context_value(output, "inference_run_id", "inferenceRunId") or make_asset_id("infer")
     output_prefix = _context_value(output, "prefix", "prefix") or f"inference-runs/{inference_run_id}"
