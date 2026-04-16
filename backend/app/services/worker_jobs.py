@@ -27,6 +27,7 @@ from app.services.blob_store import (
     upload_json_blob,
 )
 from app.services.cvat import export_cvat_for_mask
+from app.services.gpu_runtime import require_gpu_device
 from app.services.modeling import build_features, calculate_inference_payload, compute_metrics
 from app.services.yolo_segmentation import (
     build_training_summary,
@@ -532,6 +533,8 @@ def _process_training(context: dict, report_progress=None) -> dict:
         )
 
     output = context.get("output") or {}
+    params = resolve_training_params(context)
+    params["device"] = require_gpu_device(params.get("device"), operation="Treino YOLO Segmentation")
     training_run_id = _context_value(output, "training_run_id", "trainingRunId") or make_asset_id("train")
     output_prefix = _context_value(output, "prefix", "prefix") or f"training-runs/{training_run_id}"
     logger.info(
@@ -565,7 +568,6 @@ def _process_training(context: dict, report_progress=None) -> dict:
     val_records = [loaded_by_id[sample_id] for sample_id in split_map["val"]]
     test_records = [loaded_by_id[sample_id] for sample_id in split_map["test"]]
 
-    params = resolve_training_params(context)
     _report_progress(
         report_progress,
         "preparing_yolo_dataset",
@@ -718,6 +720,7 @@ def _process_inference(payload: dict, context: dict, report_progress=None) -> di
         raise HTTPException(status_code=400, detail="Job de inferencia precisa de image_url.")
 
     params = resolve_training_params(context)
+    device = require_gpu_device(params.get("device"), operation="Inferencia YOLO Segmentation")
     output = context.get("output") or {}
     inference_run_id = _context_value(output, "inference_run_id", "inferenceRunId") or make_asset_id("infer")
     output_prefix = _context_value(output, "prefix", "prefix") or f"inference-runs/{inference_run_id}"
@@ -765,7 +768,7 @@ def _process_inference(payload: dict, context: dict, report_progress=None) -> di
             iou=params["iou"],
             retina_masks=True,
             verbose=False,
-            device=params["device"],
+            device=device,
         )[0]
         prediction = build_yolo_class_mask(
             prediction_result,

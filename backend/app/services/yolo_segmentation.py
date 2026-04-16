@@ -9,7 +9,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from app.config import ANNOTATED_CLASS_IDS, CLASS_MAP, INFERRED_CLASS_ID
+from app.config import ANNOTATED_CLASS_IDS, CLASS_MAP, INFERRED_CLASS_ID, WORKER_DEFAULT_YOLO_DEVICE
+from app.services.gpu_runtime import require_gpu_device
 from app.services.modeling import compute_metrics
 
 
@@ -37,7 +38,7 @@ def resolve_training_params(context: dict | None = None) -> dict:
         "lrf": float(training.get("lrf") or 0.01),
         "weight_decay": float(training.get("weight_decay") or training.get("weightDecay") or 0.0005),
         "dropout": float(training.get("dropout") or 0.0),
-        "device": training.get("device") or "0",
+        "device": training.get("device") or WORKER_DEFAULT_YOLO_DEVICE,
         "workers": int(training.get("workers") or 8),
         "cache": bool(training.get("cache", True)),
         "amp": bool(training.get("amp", True)),
@@ -134,6 +135,11 @@ def train_yolo_segmentation(*, data_yaml: str, output_dir: str, run_name: str, p
     ensure_ultralytics_available()
     from ultralytics import YOLO
 
+    device = require_gpu_device(
+        params.get("device"),
+        operation="Treino YOLO Segmentation",
+        fallback_device=WORKER_DEFAULT_YOLO_DEVICE,
+    )
     model = YOLO(params["model"])
     project_dir = Path(output_dir) / "ultralytics_runs"
     results = model.train(
@@ -174,7 +180,7 @@ def train_yolo_segmentation(*, data_yaml: str, output_dir: str, run_name: str, p
         save=True,
         save_period=10,
         cos_lr=True,
-        device=params["device"],
+        device=device,
         workers=params["workers"],
         verbose=False,
     )
@@ -230,6 +236,11 @@ def evaluate_yolo_model_on_samples(model_path: str, samples: list[dict], *, para
     ensure_ultralytics_available()
     from ultralytics import YOLO
 
+    device = require_gpu_device(
+        params.get("device"),
+        operation="Avaliacao YOLO Segmentation",
+        fallback_device=WORKER_DEFAULT_YOLO_DEVICE,
+    )
     model = YOLO(model_path)
     all_true = []
     all_pred = []
@@ -242,7 +253,7 @@ def evaluate_yolo_model_on_samples(model_path: str, samples: list[dict], *, para
             iou=params["iou"],
             retina_masks=True,
             verbose=False,
-            device=params["device"],
+            device=device,
         )[0]
         pred_mask = build_yolo_class_mask(
             result,

@@ -55,10 +55,13 @@ Use `venv` por padrao. Rodar fora dela pode misturar `numpy/scipy/sklearn` do si
 - `LOG_LEVEL`: nivel de log do Uvicorn
 - `CONTROL_PLANE_URL`: URL do frontend/control plane
 - `WORKER_PUBLIC_URL`: URL publica do worker usada no registro/heartbeat
+- `WORKER_DEFAULT_YOLO_DEVICE`: GPU padrao usada pelo YOLO, por exemplo `0`
 - `WORKER_SHARED_TOKEN`: token compartilhado com o frontend
 - `BLOB_READ_WRITE_TOKEN`: token do Blob para leitura/escrita dos artefatos
 - `BLOB_ACCESS`: `public` ou `private`
 - `WORKER_JOB_STUCK_AFTER_SECONDS`: limite sem progresso para marcar o job como provavelmente travado no `/api/worker`
+
+Treino e inferencia exigem GPU CUDA funcional. Se o worker subir sem CUDA ou com `device=cpu`, esses jobs falham com erro explicito em vez de rodarem silenciosamente em CPU.
 
 ## Fluxo
 

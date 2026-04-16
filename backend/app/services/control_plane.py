@@ -15,6 +15,7 @@ from app.config import (
     BLOB_READ_WRITE_TOKEN,
     CONTROL_PLANE_URL,
     WORKER_CAPABILITIES,
+    WORKER_DEFAULT_YOLO_DEVICE,
     WORKER_HEARTBEAT_ENABLED,
     WORKER_HEARTBEAT_INTERVAL_SECONDS,
     WORKER_ID,
@@ -26,6 +27,7 @@ from app.config import (
     WORKER_PUBLIC_URL,
     WORKER_SHARED_TOKEN,
 )
+from app.services.gpu_runtime import torch_runtime_info
 from app.logging_utils import compact_json, get_logger
 from app.services.storage import now_iso
 from app.services.worker_jobs import process_control_plane_job
@@ -677,6 +679,12 @@ def control_plane_status() -> dict:
         "max_concurrent_jobs": WORKER_MAX_CONCURRENT_JOBS,
         "capabilities": list(WORKER_CAPABILITIES),
         "blob_configured": bool(BLOB_READ_WRITE_TOKEN),
+        "compute_policy": {
+            "default_yolo_device": WORKER_DEFAULT_YOLO_DEVICE,
+            "training_requires_gpu": True,
+            "inference_requires_gpu": True,
+        },
+        "torch_runtime": torch_runtime_info(),
         "version": APP_VERSION,
         "current_job": runtime_state["active_job_details"][0] if runtime_state.get("active_job_details") else None,
     }
