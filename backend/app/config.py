@@ -1,4 +1,9 @@
 import os
+import platform
+
+
+def default_worker_id() -> str:
+    return platform.node().strip() or "facilita-coffee-worker"
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -48,7 +53,7 @@ BLOB_BASE_URL = os.getenv("BLOB_BASE_URL", "").strip()
 BLOB_ACCESS = "private" if os.getenv("BLOB_ACCESS", "public").strip().lower() == "private" else "public"
 
 CONTROL_PLANE_URL = os.getenv("CONTROL_PLANE_URL", "").strip().rstrip("/")
-WORKER_ID = os.getenv("WORKER_ID", "").strip() or os.uname().nodename
+WORKER_ID = os.getenv("WORKER_ID", "").strip() or default_worker_id()
 WORKER_LABEL = os.getenv("WORKER_LABEL", "").strip() or "facilita-coffee-worker"
 WORKER_PUBLIC_URL = os.getenv("WORKER_PUBLIC_URL", "").strip().rstrip("/")
 WORKER_SHARED_TOKEN = os.getenv("WORKER_SHARED_TOKEN", "").strip()

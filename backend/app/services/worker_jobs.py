@@ -1,10 +1,13 @@
 from io import BytesIO
+import os
+import shutil
+import tempfile
+from pathlib import Path
 
 import joblib
 import numpy as np
 from fastapi import HTTPException
 from PIL import Image, ImageOps
-from sklearn.ensemble import RandomForestClassifier
 
 from app.config import ANNOTATED_CLASS_IDS, CLASS_MAP
 from app.logging_utils import get_logger
@@ -24,12 +27,15 @@ from app.services.blob_store import (
     upload_json_blob,
 )
 from app.services.cvat import export_cvat_for_mask
-from app.services.modeling import (
-    MAX_PIXELS_PER_CLASS,
-    build_features,
-    calculate_inference_payload,
-    compute_metrics,
-    sample_training_pixels,
+from app.services.modeling import build_features, calculate_inference_payload, compute_metrics
+from app.services.yolo_segmentation import (
+    build_training_summary,
+    build_yolo_class_mask,
+    ensure_ultralytics_available,
+    evaluate_yolo_model_on_samples,
+    export_samples_to_yolo_dataset,
+    resolve_training_params,
+    train_yolo_segmentation,
 )
 from app.services.remote_assets import fetch_remote_image, fetch_remote_text
 from app.services.storage import build_split_map, class_catalog, make_asset_id, now_iso
@@ -499,7 +505,7 @@ def _empty_metric_payload() -> dict:
 
 
 def _evaluate_classifier_on_loaded_samples(
-    classifier: RandomForestClassifier,
+    classifier,
     samples: list[dict],
 ) -> dict:
     if not samples:
@@ -516,6 +522,7 @@ def _evaluate_classifier_on_loaded_samples(
 
 
 def _process_training(context: dict, report_progress=None) -> dict:
+    ensure_ultralytics_available()
     dataset = context.get("dataset") or {}
     raw_samples = dataset.get("samples") or []
     if len(raw_samples) < 2:
@@ -528,7 +535,7 @@ def _process_training(context: dict, report_progress=None) -> dict:
     training_run_id = _context_value(output, "training_run_id", "trainingRunId") or make_asset_id("train")
     output_prefix = _context_value(output, "prefix", "prefix") or f"training-runs/{training_run_id}"
     logger.info(
-        "Processando job de treino: training_run_id=%s sample_count=%s output_prefix=%s",
+        "Processando job de treino YOLO: training_run_id=%s sample_count=%s output_prefix=%s",
         training_run_id,
         len(raw_samples),
         output_prefix,
@@ -537,7 +544,7 @@ def _process_training(context: dict, report_progress=None) -> dict:
     _report_progress(
         report_progress,
         "loading_samples",
-        f"Carregando {len(raw_samples)} amostras para o treino.",
+        f"Carregando {len(raw_samples)} amostras para o treino YOLO.",
         training_run_id=training_run_id,
         sample_count=len(raw_samples),
     )
@@ -557,131 +564,132 @@ def _process_training(context: dict, report_progress=None) -> dict:
     train_records = [loaded_by_id[sample_id] for sample_id in split_map["train"]]
     val_records = [loaded_by_id[sample_id] for sample_id in split_map["val"]]
     test_records = [loaded_by_id[sample_id] for sample_id in split_map["test"]]
-    logger.info(
-        "Split de treino definido: training_run_id=%s train=%s val=%s test=%s",
-        training_run_id,
-        len(train_records),
-        len(val_records),
-        len(test_records),
-    )
+
+    params = resolve_training_params(context)
     _report_progress(
         report_progress,
-        "splitting_dataset",
-        "Split de treino definido com sucesso.",
+        "preparing_yolo_dataset",
+        "Convertendo amostras normalizadas para dataset YOLO Segmentation.",
         training_run_id=training_run_id,
-        train_count=len(train_records),
-        val_count=len(val_records),
-        test_count=len(test_records),
+        params=params,
     )
 
-    feature_batches = []
-    label_batches = []
-    _report_progress(
-        report_progress,
-        "sampling_pixels",
-        f"Amostrando pixels de {len(train_records)} amostras de treino.",
-        training_run_id=training_run_id,
-        train_count=len(train_records),
-    )
-    for sample in train_records:
-        features, labels = sample_training_pixels(sample["image_rgb"], sample["mask"])
-        feature_batches.append(features)
-        label_batches.append(labels)
-        logger.info(
-            "Pixels amostrados para treino: training_run_id=%s sample_id=%s features=%s labels=%s",
-            training_run_id,
-            sample["id"],
-            features.shape,
-            labels.shape,
+    with tempfile.TemporaryDirectory(prefix=f"facilita-yolo-{training_run_id}-") as workdir:
+        dataset_paths = export_samples_to_yolo_dataset(
+            loaded_samples=loaded_samples,
+            split_map=split_map,
+            output_dir=workdir,
         )
         _report_progress(
             report_progress,
-            "sampling_pixels",
-            f"Pixels amostrados da amostra {sample['id']}.",
+            "training_model",
+            "Treinando YOLO Segmentation.",
             training_run_id=training_run_id,
-            sample_id=sample["id"],
-            feature_rows=int(features.shape[0]),
-            feature_cols=int(features.shape[1]),
-            label_count=int(labels.shape[0]),
+            params=params,
+            data_yaml=dataset_paths["data_yaml"],
+        )
+        train_artifacts = train_yolo_segmentation(
+            data_yaml=dataset_paths["data_yaml"],
+            output_dir=workdir,
+            run_name=training_run_id,
+            params=params,
+            progress_callback=report_progress,
+            training_run_id=training_run_id,
         )
 
-    train_x = np.vstack(feature_batches)
-    train_y = np.concatenate(label_batches)
-    logger.info(
-        "Dataset de treino consolidado: training_run_id=%s train_x=%s train_y=%s",
-        training_run_id,
-        train_x.shape,
-        train_y.shape,
-    )
-    _report_progress(
-        report_progress,
-        "training_model",
-        "Treinando RandomForestClassifier.",
-        training_run_id=training_run_id,
-        train_rows=int(train_x.shape[0]),
-        train_features=int(train_x.shape[1]),
-    )
+        _report_progress(
+            report_progress,
+            "evaluating_model",
+            "Avaliando o melhor checkpoint do YOLO nas particoes train/val/test.",
+            training_run_id=training_run_id,
+        )
+        train_metrics = evaluate_yolo_model_on_samples(train_artifacts["best_model_path"], train_records, params=params)
+        val_metrics = evaluate_yolo_model_on_samples(train_artifacts["best_model_path"], val_records, params=params)
+        test_metrics = evaluate_yolo_model_on_samples(train_artifacts["best_model_path"], test_records, params=params)
 
-    classifier = RandomForestClassifier(
-        n_estimators=80,
-        max_depth=18,
-        n_jobs=-1,
-        random_state=42,
-        class_weight="balanced_subsample",
-    )
-    logger.info("Treinando RandomForestClassifier: training_run_id=%s", training_run_id)
-    classifier.fit(train_x, train_y)
-    logger.info("Treinamento concluido: training_run_id=%s", training_run_id)
-    _report_progress(
-        report_progress,
-        "evaluating_model",
-        "Treinamento concluido; calculando metricas.",
-        training_run_id=training_run_id,
-    )
+        summary = build_training_summary(
+            training_run_id=training_run_id,
+            train_artifacts=train_artifacts,
+            params=params,
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            split_map=split_map,
+        )
 
-    trained_at = now_iso()
-    model_buffer = BytesIO()
-    joblib.dump({"classifier": classifier, "trained_at": trained_at}, model_buffer)
+        trained_at = now_iso()
+        best_model_bytes = Path(train_artifacts["best_model_path"]).read_bytes()
+        last_model_bytes = Path(train_artifacts["last_model_path"]).read_bytes() if train_artifacts.get("last_model_path") and Path(train_artifacts["last_model_path"]).exists() else None
 
-    item = {
-        "id": training_run_id,
-        "trained_at": trained_at,
-        "train_samples": int(len(train_y)),
-        "splits": {key: len(value) for key, value in split_map.items()},
-        "dataset_ids": split_map,
-        "train_metrics": _evaluate_classifier_on_loaded_samples(classifier, train_records),
-        "val_metrics": _evaluate_classifier_on_loaded_samples(classifier, val_records),
-        "test_metrics": _evaluate_classifier_on_loaded_samples(classifier, test_records),
-        "classes": class_catalog(),
-        "assets": {
-            "model": upload_blob_bytes(
-                f"{output_prefix}/model.joblib",
-                model_buffer.getvalue(),
+        item = {
+            "id": training_run_id,
+            "trained_at": trained_at,
+            "train_samples": int(len(train_records)),
+            "splits": {key: len(value) for key, value in split_map.items()},
+            "dataset_ids": split_map,
+            "train_metrics": train_metrics,
+            "val_metrics": val_metrics,
+            "test_metrics": test_metrics,
+            "classes": class_catalog(),
+            "assets": {
+                "model": upload_blob_bytes(
+                    f"{output_prefix}/best.pt",
+                    best_model_bytes,
+                    content_type="application/octet-stream",
+                ),
+                "report_json": upload_json_blob(f"{output_prefix}/report.json", summary),
+                "report_md": upload_blob_bytes(
+                    f"{output_prefix}/report.md",
+                    summary["markdown"].encode("utf-8"),
+                    content_type="text/markdown; charset=utf-8",
+                ),
+            },
+            "metadata": {
+                "model": "YOLO Segmentation",
+                "task": "segment",
+                "base_model": params["model"],
+                "imgsz": params["imgsz"],
+                "epochs": params["epochs"],
+                "batch": params["batch"],
+                "patience": params["patience"],
+                "optimizer": params["optimizer"],
+                "conf": params["conf"],
+                "iou": params["iou"],
+                "mask_threshold": params["mask_threshold"],
+                "plant_inference_mode": "exclusion",
+                "summary": summary.get("executive_summary"),
+            },
+        }
+        if last_model_bytes is not None:
+            item["assets"]["last_model"] = upload_blob_bytes(
+                f"{output_prefix}/last.pt",
+                last_model_bytes,
                 content_type="application/octet-stream",
-            ),
-        },
-        "metadata": {
-            "model": "RandomForestClassifier",
-            "max_pixels_per_class": MAX_PIXELS_PER_CLASS,
-            "rng_seed_hint": 42,
-        },
-    }
-    _report_progress(
-        report_progress,
-        "uploading_training_artifacts",
-        "Enviando artefatos do treino para o Blob.",
-        training_run_id=training_run_id,
-    )
-    item["assets"]["report_json"] = upload_json_blob(f"{output_prefix}/report.json", item)
+            )
+        if train_artifacts.get("results_csv") and Path(train_artifacts["results_csv"]).exists():
+            item["assets"]["history_csv"] = upload_blob_bytes(
+                f"{output_prefix}/history.csv",
+                Path(train_artifacts["results_csv"]).read_bytes(),
+                content_type="text/csv; charset=utf-8",
+            )
+        if train_artifacts.get("results_png") and Path(train_artifacts["results_png"]).exists():
+            item["assets"]["results_plot"] = upload_blob_bytes(
+                f"{output_prefix}/results.png",
+                Path(train_artifacts["results_png"]).read_bytes(),
+                content_type="image/png",
+            )
+
     logger.info(
-        "Artefatos de treino enviados ao Blob: training_run_id=%s assets=%s",
+        "Treino YOLO concluido: training_run_id=%s best_model=%s",
         training_run_id,
-        sorted(item["assets"].keys()),
+        item["assets"]["model"],
     )
     return {"item": item}
 
-
 def _load_model_from_context(context: dict):
+    ensure_ultralytics_available()
+    from ultralytics import YOLO
+
     model = context.get("model") or {}
     model_asset = model.get("asset")
     if not model_asset:
@@ -689,43 +697,32 @@ def _load_model_from_context(context: dict):
             status_code=400,
             detail="Nao existe modelo ativo no control plane para executar a inferencia.",
         )
-    logger.info("Baixando modelo ativo para inferencia: model_id=%s", model.get("id"))
+    logger.info("Baixando modelo ativo YOLO para inferencia: model_id=%s", model.get("id"))
     model_bytes = download_blob_bytes(
         _asset_reference(model_asset),
         access=model_asset.get("access") or blob_access(),
         expected_size=_asset_expected_size(model_asset),
     )
-    try:
-        payload = joblib.load(BytesIO(model_bytes))
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.exception(
-            "Falha ao carregar modelo do Blob: model_id=%s reference=%s expected_size=%s actual_bytes=%s",
-            model.get("id"),
-            _asset_reference(model_asset),
-            _asset_expected_size(model_asset),
-            len(model_bytes),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Nao foi possivel carregar o modelo ativo. "
-                "O arquivo do modelo no Blob parece incompleto ou corrompido."
-            ),
-        ) from exc
-    logger.info("Modelo carregado para inferencia: model_id=%s trained_at=%s", model.get("id"), payload["trained_at"])
-    return payload["classifier"], payload["trained_at"], model.get("id")
-
+    suffix = os.path.splitext(_asset_reference(model_asset) or "model.pt")[1] or ".pt"
+    temp_file = tempfile.NamedTemporaryFile(prefix="facilita-model-", suffix=suffix, delete=False)
+    temp_file.write(model_bytes)
+    temp_file.flush()
+    temp_file.close()
+    yolo = YOLO(temp_file.name)
+    logger.info("Modelo YOLO carregado para inferencia: model_id=%s trained_at=%s", model.get("id"), model.get("trained_at"))
+    return yolo, model.get("trained_at"), model.get("id"), temp_file.name
 
 def _process_inference(payload: dict, context: dict, report_progress=None) -> dict:
     image_source = _payload_value(payload, "image_url", "imageUrl")
     if not image_source:
         raise HTTPException(status_code=400, detail="Job de inferencia precisa de image_url.")
 
+    params = resolve_training_params(context)
     output = context.get("output") or {}
     inference_run_id = _context_value(output, "inference_run_id", "inferenceRunId") or make_asset_id("infer")
     output_prefix = _context_value(output, "prefix", "prefix") or f"inference-runs/{inference_run_id}"
     logger.info(
-        "Processando job de inferencia: inference_run_id=%s image_source=%s output_prefix=%s",
+        "Processando job de inferencia YOLO: inference_run_id=%s image_source=%s output_prefix=%s",
         inference_run_id,
         _source_reference_label(image_source),
         output_prefix,
@@ -734,95 +731,98 @@ def _process_inference(payload: dict, context: dict, report_progress=None) -> di
     _report_progress(
         report_progress,
         "loading_model",
-        "Baixando modelo ativo para executar a inferencia.",
+        "Baixando modelo ativo YOLO para executar a inferencia.",
         inference_run_id=inference_run_id,
     )
-    classifier, trained_at, training_run_id = _load_model_from_context(context)
-    _report_progress(
-        report_progress,
-        "loading_input",
-        "Carregando imagem de entrada para inferencia.",
-        inference_run_id=inference_run_id,
-        training_run_id=training_run_id,
-    )
-    source_image, original_filename = _read_image_source(
-        image_source,
-        fallback_filename="imagem-remota.png",
-        convert_mode="RGB",
-    )
-    image_rgb = np.array(source_image)
-    _report_progress(
-        report_progress,
-        "predicting",
-        "Executando predicao da inferencia.",
-        inference_run_id=inference_run_id,
-        training_run_id=training_run_id,
-        image_shape=list(image_rgb.shape),
-    )
-    prediction = classifier.predict(build_features(image_rgb)).reshape(image_rgb.shape[:2]).astype(np.uint8)
-    logger.info(
-        "Inferencia calculada: inference_run_id=%s image_shape=%s model_id=%s",
-        inference_run_id,
-        image_rgb.shape,
-        training_run_id,
-    )
-    color_mask = build_color_mask(prediction)
-    overlay = build_overlay(image_rgb, prediction)
+    yolo_model, trained_at, training_run_id, temp_model_path = _load_model_from_context(context)
+    try:
+        _report_progress(
+            report_progress,
+            "loading_input",
+            "Carregando imagem de entrada para inferencia.",
+            inference_run_id=inference_run_id,
+            training_run_id=training_run_id,
+        )
+        source_image, original_filename = _read_image_source(
+            image_source,
+            fallback_filename="imagem-remota.png",
+            convert_mode="RGB",
+        )
+        image_rgb = np.array(source_image)
+        _report_progress(
+            report_progress,
+            "predicting",
+            "Executando predicao YOLO segmentation.",
+            inference_run_id=inference_run_id,
+            training_run_id=training_run_id,
+            image_shape=list(image_rgb.shape),
+        )
+        prediction_result = yolo_model.predict(
+            source=image_rgb,
+            task="segment",
+            imgsz=params["imgsz"],
+            conf=params["conf"],
+            iou=params["iou"],
+            retina_masks=True,
+            verbose=False,
+            device=params["device"],
+        )[0]
+        prediction = build_yolo_class_mask(
+            prediction_result,
+            image_shape=image_rgb.shape[:2],
+            mask_threshold=params["mask_threshold"],
+        )
+        logger.info(
+            "Inferencia YOLO calculada: inference_run_id=%s image_shape=%s model_id=%s",
+            inference_run_id,
+            image_rgb.shape,
+            training_run_id,
+        )
+        color_mask = build_color_mask(prediction)
+        overlay = build_overlay(image_rgb, prediction)
 
-    image_bytes = _encode_png(source_image)
-    mask_bytes = _encode_png(Image.fromarray(prediction, mode="L"))
-    color_mask_bytes = _encode_png(Image.fromarray(color_mask))
-    overlay_bytes = _encode_png(Image.fromarray(overlay))
-    metrics = calculate_inference_payload(prediction)
-    logger.info(
-        "Metricas da inferencia prontas: inference_run_id=%s coffee_percent=%s mapped_percent=%s",
-        inference_run_id,
-        metrics.get("coffee_percentual_na_imagem"),
-        metrics.get("area_mapeada_percentual_na_imagem"),
-    )
+        image_bytes = _encode_png(source_image)
+        mask_bytes = _encode_png(Image.fromarray(prediction, mode="L"))
+        color_mask_bytes = _encode_png(Image.fromarray(color_mask))
+        overlay_bytes = _encode_png(Image.fromarray(overlay))
+        metrics = calculate_inference_payload(prediction)
 
-    item = {
-        "id": inference_run_id,
-        "training_run_id": training_run_id,
-        "trained_at": trained_at,
-        "original_filename": original_filename,
-        "width": source_image.width,
-        "height": source_image.height,
-        "metrics": metrics,
-        "assets": {
-            "image": upload_blob_bytes(f"{output_prefix}/input.png", image_bytes, content_type="image/png"),
-            "mask": upload_blob_bytes(f"{output_prefix}/mask.png", mask_bytes, content_type="image/png"),
-            "color_mask": upload_blob_bytes(
-                f"{output_prefix}/color-mask.png",
-                color_mask_bytes,
-                content_type="image/png",
-            ),
-            "overlay": upload_blob_bytes(
-                f"{output_prefix}/overlay.png",
-                overlay_bytes,
-                content_type="image/png",
-            ),
-        },
-        "metadata": {
-            "source_reference": {"image_url": image_source},
-            "blob_access": blob_access(),
-        },
-    }
-    _report_progress(
-        report_progress,
-        "uploading_inference_artifacts",
-        "Enviando artefatos da inferencia para o Blob.",
-        inference_run_id=inference_run_id,
-        training_run_id=training_run_id,
-    )
-    item["assets"]["result_json"] = upload_json_blob(f"{output_prefix}/result.json", item)
-    logger.info(
-        "Artefatos de inferencia enviados ao Blob: inference_run_id=%s assets=%s",
-        inference_run_id,
-        sorted(item["assets"].keys()),
-    )
-    return {"item": item}
-
+        item = {
+            "id": inference_run_id,
+            "training_run_id": training_run_id,
+            "trained_at": trained_at,
+            "original_filename": original_filename,
+            "width": source_image.width,
+            "height": source_image.height,
+            "metrics": metrics,
+            "assets": {
+                "image": upload_blob_bytes(f"{output_prefix}/input.png", image_bytes, content_type="image/png"),
+                "mask": upload_blob_bytes(f"{output_prefix}/mask.png", mask_bytes, content_type="image/png"),
+                "color_mask": upload_blob_bytes(
+                    f"{output_prefix}/color-mask.png",
+                    color_mask_bytes,
+                    content_type="image/png",
+                ),
+                "overlay": upload_blob_bytes(
+                    f"{output_prefix}/overlay.png",
+                    overlay_bytes,
+                    content_type="image/png",
+                ),
+            },
+            "metadata": {
+                "source_reference": {"image_url": image_source},
+                "blob_access": blob_access(),
+                "task": "segment",
+                "plant_inference_mode": "exclusion",
+            },
+        }
+        item["assets"]["result_json"] = upload_json_blob(f"{output_prefix}/result.json", item)
+        return {"item": item}
+    finally:
+        try:
+            os.unlink(temp_model_path)
+        except OSError:
+            pass
 
 def process_control_plane_job(job: dict, context: dict | None = None, report_progress=None) -> dict:
     kind = str(job.get("kind") or "").strip()
