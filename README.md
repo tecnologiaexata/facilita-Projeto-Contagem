@@ -57,7 +57,7 @@ Use `venv` por padrao. Rodar fora dela pode misturar `numpy/scipy/sklearn` do si
 - `WORKER_PUBLIC_URL`: URL publica do worker usada no registro/heartbeat
 - `WORKER_DEFAULT_YOLO_DEVICE`: GPU padrao usada pelo YOLO, por exemplo `0`
 - `PYTORCH_INSTALL_MODE`: `cuda`, `auto`, `cpu` ou `skip` para controlar como o `workerctl.sh` instala o PyTorch. O padrao atual do projeto e `cuda`
-- `PYTORCH_INDEX_URL`: indice PyTorch usado quando o modo CUDA estiver ativo
+- `PYTORCH_INDEX_URL`: indice PyTorch usado quando o modo CUDA estiver ativo. Se ficar vazio, o `workerctl.sh` escolhe automaticamente `cu128` em GPUs Blackwell/B200 e `cu124` nas demais GPUs NVIDIA
 - `WORKER_SHARED_TOKEN`: token compartilhado com o frontend
 - `BLOB_READ_WRITE_TOKEN`: token do Blob para leitura/escrita dos artefatos
 - `BLOB_ACCESS`: `public` ou `private`
@@ -100,6 +100,7 @@ O `workerctl.sh`:
 - le o `.env` automaticamente
 - cria `.venv` se ainda nao existir
 - instala `torch/torchvision/torchaudio` com wheel CUDA quando houver GPU detectada ou quando `PYTORCH_INSTALL_MODE=cuda`
+- em GPUs Blackwell como `B200`, promove automaticamente o indice oficial do PyTorch para `cu128` mesmo se o `.env` antigo ainda estiver apontando para `cu124`
 - instala dependencias apenas quando `backend/requirements.txt` mudar
 - sobe o worker em background
 - grava logs em `logs/worker.log`

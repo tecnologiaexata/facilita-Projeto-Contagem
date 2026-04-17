@@ -68,7 +68,7 @@ requirements_hash() {
   local requirements_sha pytorch_mode pytorch_index
   requirements_sha="$(sha256sum "${REQUIREMENTS_FILE}" | awk '{print $1}')"
   pytorch_mode="${PYTORCH_INSTALL_MODE:-cuda}"
-  pytorch_index="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu124}"
+  pytorch_index="$(pytorch_index_url)"
   printf '%s' "${requirements_sha}|${pytorch_mode}|${pytorch_index}" | sha256sum | awk '{print $1}'
 }
 
@@ -83,12 +83,61 @@ has_nvidia_gpu() {
   command -v nvidia-smi >/dev/null 2>&1
 }
 
+gpu_names() {
+  if ! has_nvidia_gpu; then
+    return 0
+  fi
+
+  nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || true
+}
+
+has_blackwell_gpu() {
+  local names
+  names="$(gpu_names)"
+  [[ -n "${names}" ]] || return 1
+  grep -Eiq 'B200|B100|GB200|GB300|Blackwell|RTX PRO 6000 Blackwell|RTX 50' <<<"${names}"
+}
+
+index_url_supports_blackwell() {
+  local index_url="${1:-}"
+  [[ -n "${index_url}" ]] || return 1
+  if [[ "${index_url}" =~ /cu([0-9]{3})/?$ ]]; then
+    local version="${BASH_REMATCH[1]}"
+    [[ "${version}" -ge 128 ]]
+    return
+  fi
+  return 1
+}
+
+default_pytorch_index_url() {
+  if has_blackwell_gpu; then
+    printf '%s' "https://download.pytorch.org/whl/cu128"
+  else
+    printf '%s' "https://download.pytorch.org/whl/cu124"
+  fi
+}
+
 pytorch_install_mode() {
   printf '%s' "${PYTORCH_INSTALL_MODE:-cuda}"
 }
 
 pytorch_index_url() {
-  printf '%s' "${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu124}"
+  local configured="${PYTORCH_INDEX_URL:-}"
+  local fallback
+  fallback="$(default_pytorch_index_url)"
+
+  if [[ -z "${configured}" ]]; then
+    printf '%s' "${fallback}"
+    return
+  fi
+
+  if has_blackwell_gpu && ! index_url_supports_blackwell "${configured}"; then
+    log "GPU Blackwell detectada; substituindo PYTORCH_INDEX_URL=${configured} por ${fallback}"
+    printf '%s' "${fallback}"
+    return
+  fi
+
+  printf '%s' "${configured}"
 }
 
 ensure_pytorch_runtime() {
