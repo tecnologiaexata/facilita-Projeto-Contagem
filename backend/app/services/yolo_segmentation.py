@@ -2,6 +2,7 @@ import csv
 import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import Callable
 
@@ -23,13 +24,111 @@ def ensure_ultralytics_available() -> None:
         ) from exc
 
 
+def _coerce_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on", "sim"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off", "nao", "não"}:
+        return False
+    return default
+
+
+def _align_to_stride(value: int, stride: int = 32) -> int:
+    return max(stride, int(math.ceil(max(float(value), 1.0) / stride) * stride))
+
+
+def _normalize_imgsz(value):
+    if value in (None, "", []):
+        return None
+
+    if isinstance(value, (list, tuple)):
+        parsed = [_normalize_imgsz(item) for item in value if item not in (None, "", [])]
+        parsed = [item for item in parsed if item is not None]
+        if len(parsed) >= 2:
+            return [int(parsed[0]), int(parsed[1])]
+        if len(parsed) == 1:
+            return int(parsed[0])
+        return None
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"native", "original", "full", "fullres", "full-res", "real", "source"}:
+            return None
+        parts = [part for part in re.split(r"[^0-9]+", normalized) if part]
+        if len(parts) >= 2:
+            return [_align_to_stride(int(parts[0])), _align_to_stride(int(parts[1]))]
+        if len(parts) == 1:
+            return _align_to_stride(int(parts[0]))
+        return None
+
+    try:
+        return _align_to_stride(int(float(value)))
+    except Exception:
+        return None
+
+
+def _format_imgsz(value) -> str:
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return f"{value[0]}x{value[1]}"
+    if value in (None, ""):
+        return "nativo"
+    return str(value)
+
+
+def resolve_training_runtime_params(params: dict, samples: list[dict]) -> dict:
+    runtime = dict(params)
+    shapes = [tuple(sample["image_rgb"].shape[:2]) for sample in samples if sample.get("image_rgb") is not None]
+    if not shapes:
+        return runtime
+
+    heights = [shape[0] for shape in shapes]
+    widths = [shape[1] for shape in shapes]
+    runtime["source_image_summary"] = {
+        "count": len(shapes),
+        "min_height": int(min(heights)),
+        "max_height": int(max(heights)),
+        "min_width": int(min(widths)),
+        "max_width": int(max(widths)),
+    }
+
+    if runtime.get("native_resolution") and runtime.get("imgsz") is None:
+        runtime["requested_imgsz"] = "native"
+        runtime["imgsz"] = _align_to_stride(max(max(heights), max(widths)))
+        runtime["resolved_train_imgsz"] = runtime["imgsz"]
+        runtime["resolution_mode"] = "native_long_side"
+    else:
+        runtime["resolved_train_imgsz"] = runtime.get("imgsz")
+        runtime["resolution_mode"] = "explicit"
+    return runtime
+
+
+def resolve_prediction_imgsz(params: dict, image_shape: tuple[int, int]) -> int | list[int]:
+    explicit_imgsz = params.get("imgsz")
+    if explicit_imgsz is not None:
+        return explicit_imgsz
+    height, width = image_shape[:2]
+    return [_align_to_stride(height), _align_to_stride(width)]
+
+
 def resolve_training_params(context: dict | None = None) -> dict:
     context = context or {}
     training = context.get("training") or {}
     model_cfg = context.get("model") or {}
+    raw_imgsz = training.get("imgsz")
+    if raw_imgsz in (None, ""):
+        raw_imgsz = training.get("image_size") or training.get("imageSize")
+    normalized_imgsz = _normalize_imgsz(raw_imgsz)
+    native_resolution = _coerce_bool(
+        training.get("native_resolution") or training.get("nativeResolution"),
+        default=normalized_imgsz is None,
+    )
     return {
         "model": training.get("base_model") or training.get("baseModel") or model_cfg.get("base_model") or "yolo11m-seg.pt",
-        "imgsz": int(training.get("imgsz") or training.get("image_size") or training.get("imageSize") or 1280),
+        "imgsz": normalized_imgsz,
         "epochs": int(training.get("epochs") or 180),
         "batch": training.get("batch") if training.get("batch") is not None else -1,
         "patience": int(training.get("patience") or 45),
@@ -60,6 +159,8 @@ def resolve_training_params(context: dict | None = None) -> dict:
         "hsv_s": float(training.get("hsv_s") or training.get("hsvS") or 0.5),
         "hsv_v": float(training.get("hsv_v") or training.get("hsvV") or 0.25),
         "close_mosaic": int(training.get("close_mosaic") or training.get("closeMosaic") or 10),
+        "native_resolution": native_resolution,
+        "rect": _coerce_bool(training.get("rect"), default=True),
     }
 
 
@@ -182,6 +283,7 @@ def train_yolo_segmentation(*, data_yaml: str, output_dir: str, run_name: str, p
         cos_lr=True,
         device=device,
         workers=params["workers"],
+        rect=params.get("rect", True),
         verbose=False,
     )
     save_dir = Path(results.save_dir)
@@ -245,10 +347,11 @@ def evaluate_yolo_model_on_samples(model_path: str, samples: list[dict], *, para
     all_true = []
     all_pred = []
     for sample in samples:
+        predict_imgsz = resolve_prediction_imgsz(params, sample["mask"].shape)
         result = model.predict(
             source=sample["image_rgb"],
             task="segment",
-            imgsz=params["imgsz"],
+            imgsz=predict_imgsz,
             conf=params["conf"],
             iou=params["iou"],
             retina_masks=True,
@@ -355,7 +458,8 @@ def build_training_summary(*, training_run_id: str, train_artifacts: dict, param
 ## Configuração usada
 - Modelo base: `{params['model']}`
 - Tarefa: `YOLO Segmentation`
-- Imagem (`imgsz`): `{params['imgsz']}`
+- Imagem (`imgsz`): `{_format_imgsz(params['imgsz'])}`
+- Modo de resoluÃ§Ã£o: `{params.get('resolution_mode') or ('native_long_side' if params.get('native_resolution') else 'explicit')}`
 - Épocas: `{params['epochs']}`
 - Batch: `{params['batch']}`
 - Patience: `{params['patience']}`

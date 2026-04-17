@@ -35,7 +35,9 @@ from app.services.yolo_segmentation import (
     ensure_ultralytics_available,
     evaluate_yolo_model_on_samples,
     export_samples_to_yolo_dataset,
+    resolve_prediction_imgsz,
     resolve_training_params,
+    resolve_training_runtime_params,
     train_yolo_segmentation,
 )
 from app.services.remote_assets import fetch_remote_image, fetch_remote_text
@@ -567,7 +569,7 @@ def _process_training(context: dict, report_progress=None) -> dict:
     train_records = [loaded_by_id[sample_id] for sample_id in split_map["train"]]
     val_records = [loaded_by_id[sample_id] for sample_id in split_map["val"]]
     test_records = [loaded_by_id[sample_id] for sample_id in split_map["test"]]
-
+    params = resolve_training_runtime_params(params, loaded_samples)
     _report_progress(
         report_progress,
         "preparing_yolo_dataset",
@@ -651,6 +653,8 @@ def _process_training(context: dict, report_progress=None) -> dict:
                 "task": "segment",
                 "base_model": params["model"],
                 "imgsz": params["imgsz"],
+                "native_resolution": params.get("native_resolution"),
+                "resolution_mode": params.get("resolution_mode"),
                 "epochs": params["epochs"],
                 "batch": params["batch"],
                 "patience": params["patience"],
@@ -772,10 +776,11 @@ def _process_inference(payload: dict, context: dict, report_progress=None) -> di
             training_run_id=training_run_id,
             image_shape=list(image_rgb.shape),
         )
+        predict_imgsz = resolve_prediction_imgsz(params, image_rgb.shape[:2])
         prediction_result = yolo_model.predict(
             source=image_rgb,
             task="segment",
-            imgsz=params["imgsz"],
+            imgsz=predict_imgsz,
             conf=params["conf"],
             iou=params["iou"],
             retina_masks=True,
@@ -829,6 +834,8 @@ def _process_inference(payload: dict, context: dict, report_progress=None) -> di
                 "blob_access": blob_access(),
                 "task": "segment",
                 "plant_inference_mode": "exclusion",
+                "imgsz": predict_imgsz,
+                "native_resolution": params.get("native_resolution"),
             },
         }
         item["assets"]["result_json"] = upload_json_blob(f"{output_prefix}/result.json", item)
