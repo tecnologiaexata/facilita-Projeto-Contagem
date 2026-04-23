@@ -9,7 +9,7 @@ import numpy as np
 from fastapi import HTTPException
 from PIL import Image, ImageOps
 
-from app.config import ANNOTATED_CLASS_IDS, CLASS_MAP
+from app.config import ANNOTATED_CLASS_IDS, CLASS_MAP, WORKER_DEFAULT_YOLO_MODEL
 from app.logging_utils import get_logger
 from app.services.annotation import (
     build_class_mask_from_txt,
@@ -38,6 +38,7 @@ from app.services.yolo_segmentation import (
     resolve_prediction_imgsz,
     resolve_training_params,
     resolve_training_runtime_params,
+    resolve_yolo_model_reference,
     train_yolo_segmentation,
 )
 from app.services.remote_assets import fetch_remote_image, fetch_remote_text
@@ -705,10 +706,26 @@ def _load_model_from_context(context: dict):
 
     model = context.get("model") or {}
     model_asset = model.get("asset")
+    local_model_reference = (
+        model.get("local_path")
+        or model.get("localPath")
+        or model.get("path")
+        or model.get("base_model")
+        or model.get("baseModel")
+        or WORKER_DEFAULT_YOLO_MODEL
+    )
     if not model_asset:
+        resolved_local_model = resolve_yolo_model_reference(local_model_reference)
+        if Path(resolved_local_model).exists():
+            logger.info("Carregando modelo YOLO local para inferencia: path=%s", resolved_local_model)
+            yolo = YOLO(resolved_local_model)
+            return yolo, None, "local-default", None
         raise HTTPException(
             status_code=400,
-            detail="Nao existe modelo ativo no control plane para executar a inferencia.",
+            detail=(
+                "Nao existe modelo ativo no control plane para executar a inferencia, "
+                "e nenhum WORKER_DEFAULT_YOLO_MODEL local foi encontrado."
+            ),
         )
     logger.info("Baixando modelo ativo YOLO para inferencia: model_id=%s", model.get("id"))
     model_reference = _asset_reference(model_asset)
@@ -837,10 +854,11 @@ def _process_inference(payload: dict, context: dict, report_progress=None) -> di
         item["assets"]["result_json"] = upload_json_blob(f"{output_prefix}/result.json", item)
         return {"item": item}
     finally:
-        try:
-            os.unlink(temp_model_path)
-        except OSError:
-            pass
+        if temp_model_path:
+            try:
+                os.unlink(temp_model_path)
+            except OSError:
+                pass
 
 def process_control_plane_job(job: dict, context: dict | None = None, report_progress=None) -> dict:
     kind = str(job.get("kind") or "").strip()

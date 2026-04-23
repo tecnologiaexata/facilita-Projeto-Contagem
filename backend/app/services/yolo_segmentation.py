@@ -10,9 +10,18 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from app.config import ANNOTATED_CLASS_IDS, CLASS_MAP, INFERRED_CLASS_ID, WORKER_DEFAULT_YOLO_DEVICE
+from app.config import (
+    ANNOTATED_CLASS_IDS,
+    CLASS_MAP,
+    INFERRED_CLASS_ID,
+    WORKER_DEFAULT_YOLO_DEVICE,
+    WORKER_DEFAULT_YOLO_MODEL,
+)
 from app.services.gpu_runtime import require_gpu_device
 from app.services.modeling import compute_metrics
+
+
+DEFAULT_YOLO_BASE_MODEL = "yolo11m-seg.pt"
 
 
 def ensure_ultralytics_available() -> None:
@@ -163,16 +172,16 @@ def resolve_training_runtime_params(params: dict, samples: list[dict]) -> dict:
     if runtime.get("native_resolution") and runtime.get("imgsz") is None:
         runtime["requested_imgsz"] = "native"
         runtime["tile_enabled"] = False
-        runtime["imgsz"] = min(_align_to_stride(max_long_side), 3072)
+        runtime["imgsz"] = min(_align_to_stride(max_long_side), 2560)
         runtime["resolved_train_imgsz"] = runtime["imgsz"]
-        runtime["resolution_mode"] = "native_capped_3072"
+        runtime["resolution_mode"] = "native_capped_2560"
     else:
         if runtime["tile_enabled"]:
             runtime["imgsz"] = tile_size
             runtime["resolved_train_imgsz"] = tile_size
             runtime["resolution_mode"] = "explicit_tiled"
         else:
-            runtime["resolution_mode"] = "fixed_3072" if int(runtime.get("imgsz") or 0) == 3072 else "explicit"
+            runtime["resolution_mode"] = "fixed_2560" if int(runtime.get("imgsz") or 0) == 2560 else "explicit"
         runtime["resolved_train_imgsz"] = runtime.get("imgsz")
 
     if runtime["tile_enabled"] and runtime.get("batch") == -1:
@@ -193,6 +202,22 @@ def resolve_prediction_imgsz(params: dict, image_shape: tuple[int, int]) -> int 
     return [_align_to_stride(height), _align_to_stride(width)]
 
 
+def resolve_yolo_model_reference(reference: str | None, *, fallback: str | None = None) -> str:
+    raw_value = str(reference or fallback or "").strip().strip("\"'")
+    if not raw_value:
+        raw_value = DEFAULT_YOLO_BASE_MODEL
+
+    expanded = os.path.expandvars(os.path.expanduser(raw_value))
+    try:
+        candidate = Path(expanded)
+    except Exception:
+        return expanded
+
+    if candidate.exists():
+        return str(candidate.resolve())
+    return expanded
+
+
 def resolve_training_params(context: dict | None = None) -> dict:
     context = context or {}
     training = context.get("training") or {}
@@ -202,7 +227,7 @@ def resolve_training_params(context: dict | None = None) -> dict:
         raw_imgsz = training.get("image_size") or training.get("imageSize")
     normalized_imgsz = _normalize_imgsz(raw_imgsz)
     if normalized_imgsz is None:
-        normalized_imgsz = 3072
+        normalized_imgsz = 2560
     native_resolution = _coerce_bool(
         training.get("native_resolution") or training.get("nativeResolution"),
         default=False,
@@ -212,7 +237,10 @@ def resolve_training_params(context: dict | None = None) -> dict:
         default=False,
     )
     return {
-        "model": training.get("base_model") or training.get("baseModel") or model_cfg.get("base_model") or "yolo11m-seg.pt",
+        "model": resolve_yolo_model_reference(
+            training.get("base_model") or training.get("baseModel") or model_cfg.get("base_model"),
+            fallback=WORKER_DEFAULT_YOLO_MODEL or DEFAULT_YOLO_BASE_MODEL,
+        ),
         "imgsz": normalized_imgsz,
         "epochs": int(training.get("epochs") or 180),
         "batch": training.get("batch") if training.get("batch") is not None else -1,
