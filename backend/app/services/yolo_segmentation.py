@@ -255,7 +255,7 @@ def resolve_training_params(context: dict | None = None) -> dict:
         "cache": bool(training.get("cache", True)),
         "amp": bool(training.get("amp", True)),
         "seed": int(training.get("seed") or 42),
-        "conf": float(training.get("conf") or 0.25),
+        "conf": float(training.get("conf") or 0.12),
         "iou": float(training.get("iou") or 0.6),
         "mask_threshold": float(training.get("mask_threshold") or training.get("maskThreshold") or 0.5),
         "degrees": float(training.get("degrees") or 2.0),
