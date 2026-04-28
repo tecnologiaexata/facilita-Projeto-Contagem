@@ -1,5 +1,10 @@
 import os
 import platform
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_YOLO_MODEL_POINTER_FILE = REPO_ROOT / ".worker-default-yolo-model"
 
 
 def default_worker_id() -> str:
@@ -21,6 +26,26 @@ def env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def default_repo_yolo_model() -> str:
+    try:
+        raw_value = DEFAULT_YOLO_MODEL_POINTER_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+    raw_value = raw_value.strip().strip("\"'")
+    if not raw_value:
+        return ""
+
+    expanded = os.path.expandvars(os.path.expanduser(raw_value))
+    try:
+        candidate = Path(expanded)
+    except Exception:
+        return ""
+    if candidate.exists():
+        return str(candidate)
+    return ""
 
 
 CLASS_MAP = {
@@ -58,7 +83,7 @@ WORKER_LABEL = os.getenv("WORKER_LABEL", "").strip() or "facilita-coffee-worker"
 WORKER_PUBLIC_URL = os.getenv("WORKER_PUBLIC_URL", "").strip().rstrip("/")
 WORKER_SHARED_TOKEN = os.getenv("WORKER_SHARED_TOKEN", "").strip()
 WORKER_DEFAULT_YOLO_DEVICE = os.getenv("WORKER_DEFAULT_YOLO_DEVICE", "").strip() or "0"
-WORKER_DEFAULT_YOLO_MODEL = os.getenv("WORKER_DEFAULT_YOLO_MODEL", "").strip()
+WORKER_DEFAULT_YOLO_MODEL = os.getenv("WORKER_DEFAULT_YOLO_MODEL", "").strip() or default_repo_yolo_model()
 WORKER_MAX_CONCURRENT_JOBS = env_int("WORKER_MAX_CONCURRENT_JOBS", 1)
 WORKER_HEARTBEAT_INTERVAL_SECONDS = max(5, env_int("WORKER_HEARTBEAT_INTERVAL_SECONDS", 15))
 WORKER_HEARTBEAT_ENABLED = env_bool("WORKER_HEARTBEAT_ENABLED", True)
