@@ -9,3 +9,4 @@ logs/
 run/
 storage/*
 !storage/.gitkeep
+backend/app/front/

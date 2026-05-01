@@ -1,0 +1,27 @@
+{
+  "folders": [
+    {
+      "name": "Coffee Backend",
+      "path": "."
+    },
+    {
+      "name": "Coffee Frontend",
+      "path": "backend/app/front/Facilita-Projeto-Coffee-Frontend"
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/.git": true,
+      "**/.next": true,
+      "**/__pycache__": true,
+      "**/node_modules": true,
+      "backend/app/front": true
+    },
+    "search.exclude": {
+      "**/.next": true,
+      "**/__pycache__": true,
+      "**/node_modules": true,
+      "backend/app/front": true
+    }
+  }
+}
