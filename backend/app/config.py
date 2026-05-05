@@ -28,6 +28,16 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_float(name: str, default: float | None = None) -> float | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 def default_repo_yolo_model() -> str:
     try:
         raw_value = DEFAULT_YOLO_MODEL_POINTER_FILE.read_text(encoding="utf-8").strip()
@@ -99,3 +109,21 @@ REMOTE_FETCH_ALLOWED_HOSTS = tuple(
     for host in os.getenv("REMOTE_FETCH_ALLOWED_HOSTS", "").split(",")
     if host.strip()
 )
+
+INFERENCE_PROVIDER = os.getenv("INFERENCE_PROVIDER", "local_yolo").strip().lower() or "local_yolo"
+ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY", "").strip()
+ROBOFLOW_API_URL = os.getenv("ROBOFLOW_API_URL", "https://detect.roboflow.com").strip().rstrip("/")
+ROBOFLOW_WORKSPACE = os.getenv("ROBOFLOW_WORKSPACE", "").strip()
+ROBOFLOW_WORKFLOW = os.getenv("ROBOFLOW_WORKFLOW", "").strip()
+ROBOFLOW_IMAGE_INPUT = os.getenv("ROBOFLOW_IMAGE_INPUT", "image").strip() or "image"
+ROBOFLOW_CLASSES = tuple(
+    class_name.strip()
+    for class_name in os.getenv("ROBOFLOW_CLASSES", "fundo,coffee").split(",")
+    if class_name.strip()
+)
+ROBOFLOW_CLASSES_PARAMETER = os.getenv("ROBOFLOW_CLASSES_PARAMETER", "classes").strip()
+ROBOFLOW_CONFIDENCE = env_float("ROBOFLOW_CONFIDENCE", 0.4)
+ROBOFLOW_CONFIDENCE_PARAMETER = os.getenv("ROBOFLOW_CONFIDENCE_PARAMETER", "confidence").strip()
+ROBOFLOW_MAX_IMAGE_SIDE = max(0, env_int("ROBOFLOW_MAX_IMAGE_SIDE", 2560))
+ROBOFLOW_USE_CACHE = env_bool("ROBOFLOW_USE_CACHE", True)
+ROBOFLOW_TIMEOUT_SECONDS = max(5, env_int("ROBOFLOW_TIMEOUT_SECONDS", 120))

@@ -58,6 +58,9 @@ Use `venv` por padrao. Rodar fora dela pode misturar `numpy/scipy/sklearn` do si
 - `WORKER_DEFAULT_YOLO_DEVICE`: GPU padrao usada pelo YOLO, por exemplo `0`
 - `WORKER_DEFAULT_YOLO_MODEL`: caminho local opcional para um checkpoint `.pt` ou para uma pasta com pesos; pode ser usado como base no treino e como fallback na inferencia
 - `.worker-default-yolo-model`: arquivo versionado opcional na raiz do repositorio com um caminho local de pesos; e usado quando `WORKER_DEFAULT_YOLO_MODEL` nao vier definido no `.env`
+- `INFERENCE_PROVIDER`: provider padrao da inferencia, `local_yolo` ou `roboflow`; a tela tambem pode enviar o provider por job
+- `ROBOFLOW_API_KEY`, `ROBOFLOW_API_URL`, `ROBOFLOW_WORKSPACE`, `ROBOFLOW_WORKFLOW`: configuracao do Workflow Roboflow usado quando o provider for `roboflow`
+- `ROBOFLOW_CLASSES`, `ROBOFLOW_CLASSES_PARAMETER`, `ROBOFLOW_CONFIDENCE`, `ROBOFLOW_CONFIDENCE_PARAMETER`, `ROBOFLOW_MAX_IMAGE_SIDE`, `ROBOFLOW_USE_CACHE`, `ROBOFLOW_TIMEOUT_SECONDS`: parametros enviados ao Workflow e pre-processamento da imagem
 - `PYTORCH_INSTALL_MODE`: `cuda`, `auto`, `cpu` ou `skip` para controlar como o `workerctl.sh` instala o PyTorch. O padrao atual do projeto e `cuda`
 - `PYTORCH_INDEX_URL`: indice PyTorch usado quando o modo CUDA estiver ativo. Se ficar vazio, o `workerctl.sh` escolhe automaticamente `cu128` em GPUs Blackwell/B200 e `cu124` nas demais GPUs NVIDIA
 - `WORKER_SHARED_TOKEN`: token compartilhado com o frontend
@@ -65,7 +68,7 @@ Use `venv` por padrao. Rodar fora dela pode misturar `numpy/scipy/sklearn` do si
 - `BLOB_ACCESS`: `public` ou `private`
 - `WORKER_JOB_STUCK_AFTER_SECONDS`: limite sem progresso para marcar o job como provavelmente travado no `/api/worker`
 
-Treino e inferencia exigem GPU CUDA funcional. Se o worker subir sem CUDA ou com `device=cpu`, esses jobs falham com erro explicito em vez de rodarem silenciosamente em CPU.
+Treino exige GPU CUDA funcional. A inferencia local YOLO usa GPU quando disponivel e pode cair para CPU; a inferencia Roboflow roda o modelo no Roboflow e pode ser processada pelo worker sem GPU.
 
 Se voce ja baixou os pesos do YOLO manualmente, pode apontar o worker para eles no `.env`, por exemplo:
 

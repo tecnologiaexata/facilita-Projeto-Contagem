@@ -2,6 +2,17 @@
 
 Comando para retomar: "retomar inferencia Roboflow".
 
+## Estado da Integracao
+
+Implementado em 05/05/2026:
+
+- O worker original aceita inferencia `local_yolo` ou `roboflow` por job via `inference_provider`.
+- A logica Roboflow foi integrada em `backend/app/services/roboflow_inference.py`.
+- O worker chama o Workflow Roboflow por HTTP direto, sem `inference-sdk`, para evitar conflito de `numpy` com Ultralytics/YOLO.
+- Depois da resposta Roboflow, o worker reaproveita o pipeline local para gerar `mask.png`, `color-mask.png`, `overlay.png`, TXT YOLO, metricas e assets no Blob.
+- O frontend principal `Facilita-Projeto-Coffee-Frontend` ganhou a aba `Inferencia Roboflow`, que cria jobs de inferencia com `inferenceProvider: "roboflow"` e confianca opcional.
+- A aba antiga foi mantida como `Inferencia YOLO`.
+
 ## Objetivo
 
 Estudar e implementar um modo em que a inferencia pesada seja feita no Roboflow, enquanto este backend continua responsavel por gerar mascaras, calcular pixels por classe e salvar artefatos no Blob/control plane.
@@ -70,9 +81,9 @@ Preferencias:
 
 ## Decisoes sugeridas
 
-- Implementar `INFERENCE_PROVIDER=local_yolo|roboflow`.
+- Implementado `INFERENCE_PROVIDER=local_yolo|roboflow`.
 - Manter YOLO local como fallback.
-- Criar servico novo, por exemplo `backend/app/services/roboflow_inference.py`.
+- Criado servico novo em `backend/app/services/roboflow_inference.py`.
 - Reaproveitar todo o pos-processamento atual depois de obter `class_mask`.
 - Testar primeiro com uma imagem unica e comparar:
   - Roboflow -> mascara -> metricas locais

@@ -9,7 +9,7 @@ import numpy as np
 from fastapi import HTTPException
 from PIL import Image, ImageOps
 
-from app.config import ANNOTATED_CLASS_IDS, CLASS_MAP, WORKER_DEFAULT_YOLO_MODEL
+from app.config import ANNOTATED_CLASS_IDS, CLASS_MAP, INFERENCE_PROVIDER, WORKER_DEFAULT_YOLO_MODEL
 from app.logging_utils import get_logger
 from app.services.annotation import (
     build_class_mask_from_txt,
@@ -43,6 +43,7 @@ from app.services.yolo_segmentation import (
     train_yolo_segmentation,
 )
 from app.services.remote_assets import fetch_remote_image, fetch_remote_text
+from app.services.roboflow_inference import run_roboflow_inference
 from app.services.storage import build_split_map, class_catalog, make_asset_id, now_iso
 
 
@@ -771,10 +772,146 @@ def _load_model_from_context(context: dict):
     logger.info("Modelo YOLO carregado para inferencia: model_id=%s trained_at=%s", model.get("id"), model.get("trained_at"))
     return yolo, model.get("trained_at"), model.get("id"), temp_file.name
 
+
+def _inference_provider_from_payload(payload: dict) -> str:
+    raw_provider = (
+        _payload_value(payload, "inference_provider", "inferenceProvider")
+        or _payload_value(payload, "provider", "provider")
+        or INFERENCE_PROVIDER
+    )
+    provider = str(raw_provider or "local_yolo").strip().lower().replace("-", "_")
+    if provider in {"yolo", "local", "local_yolo"}:
+        return "local_yolo"
+    if provider == "roboflow":
+        return "roboflow"
+    raise HTTPException(status_code=400, detail=f"Provider de inferencia nao suportado: {provider}.")
+
+
+def _process_roboflow_inference(payload: dict, context: dict, report_progress=None) -> dict:
+    image_source = _payload_value(payload, "image_url", "imageUrl")
+    if not image_source:
+        raise HTTPException(status_code=400, detail="Job de inferencia precisa de image_url.")
+
+    output = context.get("output") or {}
+    inference_run_id = _context_value(output, "inference_run_id", "inferenceRunId") or make_asset_id("infer")
+    output_prefix = _context_value(output, "prefix", "prefix") or f"inference-runs/{inference_run_id}"
+    confidence = _payload_value(payload, "confidence", "confidence")
+    logger.info(
+        "Processando job de inferencia Roboflow: inference_run_id=%s image_source=%s output_prefix=%s confidence=%s",
+        inference_run_id,
+        _source_reference_label(image_source),
+        output_prefix,
+        confidence,
+    )
+
+    _report_progress(
+        report_progress,
+        "loading_input",
+        "Carregando imagem de entrada para inferencia Roboflow.",
+        inference_run_id=inference_run_id,
+    )
+    source_image, original_filename = _read_image_source(
+        image_source,
+        fallback_filename="imagem-remota.png",
+        convert_mode="RGB",
+    )
+    _report_progress(
+        report_progress,
+        "predicting_roboflow",
+        "Executando Workflow hospedado no Roboflow.",
+        inference_run_id=inference_run_id,
+        image_shape=[source_image.height, source_image.width, 3],
+    )
+    roboflow_result = run_roboflow_inference(source_image, confidence=confidence)
+    prediction = roboflow_result["class_mask"]
+    inference_image = roboflow_result["image"]
+    image_rgb = roboflow_result["image_rgb"]
+    roboflow_metadata = roboflow_result["metadata"]
+    logger.info(
+        "Inferencia Roboflow calculada: inference_run_id=%s image_shape=%s output_mode=%s",
+        inference_run_id,
+        image_rgb.shape,
+        roboflow_metadata.get("output_mode"),
+    )
+
+    _report_progress(
+        report_progress,
+        "uploading_inference_artifacts",
+        "Enviando artefatos da inferencia Roboflow para o Blob.",
+        inference_run_id=inference_run_id,
+        output_mode=roboflow_metadata.get("output_mode"),
+    )
+    color_mask = build_color_mask(prediction)
+    overlay = build_overlay(image_rgb, prediction)
+    annotation_text = build_yolo_annotation_text_from_mask(prediction)
+    dataset_image_filename = _dataset_image_filename(original_filename, inference_run_id)
+    dataset_label_filename = f"{os.path.splitext(dataset_image_filename)[0]}.txt"
+
+    image_bytes = _encode_image_for_filename(inference_image, dataset_image_filename)
+    mask_bytes = _encode_png(Image.fromarray(prediction, mode="L"))
+    color_mask_bytes = _encode_png(Image.fromarray(color_mask))
+    overlay_bytes = _encode_png(Image.fromarray(overlay))
+    metrics = calculate_inference_payload(prediction)
+
+    item = {
+        "id": inference_run_id,
+        "training_run_id": None,
+        "trained_at": None,
+        "original_filename": original_filename,
+        "width": inference_image.width,
+        "height": inference_image.height,
+        "metrics": metrics,
+        "assets": {
+            "image": upload_blob_bytes(
+                f"{output_prefix}/dataset/images/{dataset_image_filename}",
+                image_bytes,
+            ),
+            "mask": upload_blob_bytes(f"{output_prefix}/mask.png", mask_bytes, content_type="image/png"),
+            "color_mask": upload_blob_bytes(
+                f"{output_prefix}/color-mask.png",
+                color_mask_bytes,
+                content_type="image/png",
+            ),
+            "overlay": upload_blob_bytes(
+                f"{output_prefix}/overlay.png",
+                overlay_bytes,
+                content_type="image/png",
+            ),
+            "annotation_txt": upload_blob_bytes(
+                f"{output_prefix}/dataset/labels/{dataset_label_filename}",
+                annotation_text.encode("utf-8"),
+                content_type="text/plain; charset=utf-8",
+            ),
+            "roboflow_result_json": upload_json_blob(
+                f"{output_prefix}/roboflow-result.json",
+                roboflow_result["raw_result"],
+            ),
+        },
+        "metadata": {
+            "source_reference": {"image_url": image_source},
+            "blob_access": blob_access(),
+            "task": "segment",
+            "provider": "roboflow",
+            "roboflow": roboflow_metadata,
+            "plant_inference_mode": "exclusion",
+            "dataset_export": {
+                "image_path": f"dataset/images/{dataset_image_filename}",
+                "label_path": f"dataset/labels/{dataset_label_filename}",
+            },
+        },
+    }
+    item["assets"]["result_json"] = upload_json_blob(f"{output_prefix}/result.json", item)
+    return {"item": item}
+
+
 def _process_inference(payload: dict, context: dict, report_progress=None) -> dict:
     image_source = _payload_value(payload, "image_url", "imageUrl")
     if not image_source:
         raise HTTPException(status_code=400, detail="Job de inferencia precisa de image_url.")
+
+    provider = _inference_provider_from_payload(payload)
+    if provider == "roboflow":
+        return _process_roboflow_inference(payload, context, report_progress=report_progress)
 
     params = resolve_training_params(context)
     requested_device = normalize_requested_device(params.get("device"))
@@ -881,6 +1018,7 @@ def _process_inference(payload: dict, context: dict, report_progress=None) -> di
                 "source_reference": {"image_url": image_source},
                 "blob_access": blob_access(),
                 "task": "segment",
+                "provider": "local_yolo",
                 "plant_inference_mode": "exclusion",
                 "imgsz": predict_imgsz,
                 "native_resolution": params.get("native_resolution"),
