@@ -2,17 +2,20 @@
 
 Comando para retomar: "retomar inferencia Roboflow".
 
-Atualizado em 05/05/2026.
+Atualizado em 06/05/2026.
 
 ## Estado Atual Validado
 
 O caminho aprovado para producao esta no repositorio `Facilita-Projeto-Coffee-Frontend`.
 
 - A aba `Inferencia Roboflow` chama a rota `/api/v1/inferences/roboflow-direct`.
+- A mesma aba tambem possui o bloco `Inferencia Roboflow por lote GPU`.
 - Esse fluxo e separado da inferencia YOLO local.
 - A inferencia YOLO local continua usando fila/job/worker.
 - A inferencia Roboflow direta usa a Vercel como servidor intermediario e chama a API do Roboflow diretamente.
+- A inferencia Roboflow por lote usa Roboflow Batch Processing API com GPU explicita.
 - A rota direta nao cria job e nao aciona worker YOLO.
+- O lote GPU tambem nao cria job local, nao aciona Vast e nao aciona worker YOLO.
 - O resultado e persistido diretamente em `inference_runs`.
 - O overlay correto e gerado como PNG a partir da mascara completa, igual ao padrao validado no localhost.
 - A classe `planta` e inferida por exclusao: a mascara inicia como `planta`, e os poligonos retornados pelo Roboflow sobrescrevem `fundo` e `coffee`.
@@ -28,6 +31,11 @@ fcfda44 Add Roboflow inference tab
 663175b Generate Roboflow overlays from exclusion mask
 7465ecb Retry Roboflow direct calls with smaller images
 c5866a8 Show Roboflow detection and pixel metrics
+a34a704 Add Roboflow GPU batch inference
+4cff3e6 Allow Roboflow batch blob uploads
+6c47f55 Use minimal Roboflow batch job payload
+81e4b78 Retry Roboflow GPU batch payload variants
+43a3739 Import Roboflow batch results
 ```
 
 ## Estado do Worker Original
@@ -66,6 +74,22 @@ Fluxo Roboflow direto:
    - `dataset/labels/<runId>.txt`
    - `roboflow-result.json`
 10. A rota persiste o resultado em `inference_runs`.
+
+Fluxo Roboflow por lote GPU:
+
+1. Usuario seleciona varias imagens ou uma pasta no bloco `Inferencia Roboflow por lote GPU`.
+2. O frontend prepara/redimensiona imagens e sobe entradas para o Vercel Blob.
+3. A rota `/api/v1/inferences/roboflow-batch` baixa as imagens do Blob e envia ao Roboflow Data Staging.
+4. A rota cria o job de Batch Processing com `computeConfiguration.machineType = "gpu"`.
+5. O Roboflow processa o lote e disponibiliza os resultados/exportacoes.
+6. A UI tenta sincronizar automaticamente os resultados do lote.
+7. A rota `/api/v1/inferences/roboflow-batch-sync` consulta o job, baixa JSONL/resultados, extrai `predictions`, rasteriza poligonos e recria a mascara local:
+   - `0 = fundo`
+   - `1 = coffee`
+   - `2 = planta`
+8. A mesma rota calcula metricas, gera `overlay.png`, `color-mask.png`, `mask.png`, TXT YOLO e `roboflow-result.json`.
+9. Cada imagem importada do lote e persistida em `inference_runs`, aparecendo na aba `Resultados`.
+10. Se o lote ainda estiver processando, a UI permite usar `Sincronizar ultimo lote`.
 
 Fluxo YOLO local:
 
@@ -115,6 +139,9 @@ ROBOFLOW_CONFIDENCE_PARAMETER=confidence
 ROBOFLOW_USE_CACHE=true
 ROBOFLOW_TIMEOUT_SECONDS=120
 ROBOFLOW_FALLBACK_MAX_SIDES=1920,1280,960
+ROBOFLOW_BATCH_API_URL=https://api.roboflow.com
+ROBOFLOW_BATCH_WORKERS_PER_MACHINE=1
+ROBOFLOW_BATCH_TIMEOUT_SECONDS=3600
 ```
 
 Nao colar API key no chat. Configurar apenas no `.env` local/deploy.
@@ -132,14 +159,18 @@ Preferencias:
 ## Decisoes tomadas
 
 - A inferencia Roboflow aprovada roda pela rota direta na Vercel, nao pela fila YOLO.
+- A inferencia Roboflow por lote GPU aprovada roda pela API de Batch Processing do Roboflow, tambem fora da fila YOLO.
 - A planta e sempre por exclusao quando Roboflow retorna apenas `fundo` e `coffee`.
 - O overlay aprovado e PNG calculado pixel a pixel com alpha, nao SVG de poligonos.
 - Os logs da rota direta registram etapas, payloads sanitizados, respostas, tentativas e variantes de imagem.
+- Os logs do lote usam os prefixos `[roboflow-batch]` e `[roboflow-batch-sync]`.
 - Resultados antigos mantem os artefatos antigos; para ver mudancas e preciso gerar nova inferencia.
 
 ## Observacoes
 
 - Sim, nesse desenho a inferencia acontece dentro do Roboflow.
 - O worker nao participa do fluxo Roboflow direto.
+- O worker tambem nao participa do fluxo Roboflow por lote GPU.
+- O lote GPU depende do formato JSONL/exportacao do Roboflow; se mudar o formato, revisar `pages/api/v1/inferences/roboflow-batch-sync.js` no frontend.
 - E plausivel o Roboflow estar gerando resultado visual melhor por diferenca de modelo, checkpoint, preprocessing, thresholds, resolucao ou pos-processamento.
 - Se voltar 502 do Roboflow, consultar logs da Vercel procurando `roboflow_attempt_failed`, `roboflow_image_variants_ready` e `roboflow_attempt_succeeded`.
