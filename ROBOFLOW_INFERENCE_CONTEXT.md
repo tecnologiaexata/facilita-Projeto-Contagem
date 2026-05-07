@@ -2,7 +2,7 @@
 
 Comando para retomar: "retomar inferencia Roboflow".
 
-Atualizado em 06/05/2026.
+Atualizado em 07/05/2026.
 
 ## Estado Atual Validado
 
@@ -36,6 +36,13 @@ a34a704 Add Roboflow GPU batch inference
 6c47f55 Use minimal Roboflow batch job payload
 81e4b78 Retry Roboflow GPU batch payload variants
 43a3739 Import Roboflow batch results
+edf7e14 Document Roboflow GPU batch flow
+10c1089 Enable manual and automatic batch sync
+6bd0ff5 Read Roboflow export batch ids
+230c5e0 Handle multipart Roboflow batch exports
+addffb9 Import compressed Roboflow batch results
+48ce0c1 Extract Roboflow tar batch results
+ea29bef Import Roboflow batch results incrementally
 ```
 
 ## Estado do Worker Original
@@ -90,6 +97,17 @@ Fluxo Roboflow por lote GPU:
 8. A mesma rota calcula metricas, gera `overlay.png`, `color-mask.png`, `mask.png`, TXT YOLO e `roboflow-result.json`.
 9. Cada imagem importada do lote e persistida em `inference_runs`, aparecendo na aba `Resultados`.
 10. Se o lote ainda estiver processando, a UI permite usar `Sincronizar ultimo lote`.
+11. A sincronizacao importa em blocos pequenos para evitar timeout da Vercel:
+   - body aceita `startIndex` e `importLimit`;
+   - resposta inclui `nextIndex`, `totalRecords` e `hasMore`;
+   - UI continua chamando ate `hasMore=false`.
+
+Lote testado em producao:
+
+- Batch ID: `rf_batch_moulldlk`
+- Job ID: `rfgpumoulldlk`
+- Cuidado: o ID correto tem dois `l` antes de `dk`; com um `l` o Roboflow retorna 404 `Could not find requested batch`.
+- Apos importacao do lote, a API de inferencias em producao confirmou `total=102`.
 
 Fluxo YOLO local:
 
@@ -165,6 +183,25 @@ Preferencias:
 - Os logs da rota direta registram etapas, payloads sanitizados, respostas, tentativas e variantes de imagem.
 - Os logs do lote usam os prefixos `[roboflow-batch]` e `[roboflow-batch-sync]`.
 - Resultados antigos mantem os artefatos antigos; para ver mudancas e preciso gerar nova inferencia.
+
+## Aprendizado do lote GPU - qualidade e confianca
+
+- A metrica local do lote usa a mesma base conceitual do direto: rasterizacao de `predictions`, pixels por classe e `planta` por exclusao.
+- A diferenca de qualidade observada veio da configuracao efetiva do Roboflow Batch Processing, nao da formula local de metrica.
+- No fluxo direto, a rota envia parametros dinamicos para o Workflow API, como `classes` e `confidence`.
+- No Batch Processing API, o Roboflow aceitou o payload minimo/oficial do job; na pratica o batch depende do workflow publicado no Roboflow.
+- Comparativo real em producao para `DSC00003`:
+  - Batch GPU `rfbatch-rfgpumoulldlk-1-0001_dsc00003`: `confidence=0.05`, `70` identificacoes, `Coffee 1.31%`.
+  - Direto antigo `roboflow-1778087437334`: `confidence=0`, `297` identificacoes, `Coffee 3.59%`.
+- Alterar o workflow publicado para `Custom Confidence = 0` fez um teste de 5 imagens falhar no Roboflow: 5/5 arquivos falharam no fragmento `fragmento-0`.
+- Recomendacao para proximo teste do batch:
+  - `Custom Confidence`: `0.01` ou `0.02`, evitar `0`.
+  - `Workers por maquina`: `1`.
+  - `Max Detections`: `1000`.
+  - `Max Candidates`: `1000` ou `1500`.
+  - `Mask Decode Mode`: `accurate`.
+  - Testar primeiro 1 a 3 imagens.
+- Se o Roboflow retornar `0 resultado(s) importados` apos falha do job, baixar a secao `falhas` do export para ler a mensagem real.
 
 ## Observacoes
 
